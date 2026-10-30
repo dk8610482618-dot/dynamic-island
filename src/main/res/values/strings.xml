@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Dynamic Island</string>
+    <string name="accessibility_service_label">Dynamic Island Notch Overlay</string>
+    <string name="accessibility_service_summary">Displays Dynamic Island over the camera notch and lock screen.</string>
+    <string name="accessibility_service_description">Dynamic Island uses this accessibility service to display its overlay above the camera cutout and lock screen, and to allow optional user-initiated screenshot capture via triple-tap gesture. It does not inspect screen content, automate gestures, or collect personal data.</string>
+</resources>
