@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dynamic Island — motion preview</title>
+<style>
+  :root {
+    --island-bg: #060607;
+    --line: rgba(255, 255, 255, 0.085);
+    --text: #f6f6f8;
+    --text-2: rgba(255, 255, 255, 0.69);
+    --text-3: rgba(255, 255, 255, 0.48);
+    --green: #30d158;
+    --red: #ff453a;
+    --amber: #ffd60a;
+    --blue: #0a84ff;
+    --purple: #8b5cf6;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    padding: 40px 28px;
+    min-height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 60px;
+    flex-wrap: wrap;
+    background:
+      radial-gradient(900px 640px at 78% -8%, #221a44 0%, rgba(10, 10, 18, 0) 62%),
+      radial-gradient(760px 560px at 12% 108%, #14202e 0%, rgba(5, 5, 10, 0) 60%),
+      #07070c;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- phone ---------- */
+
+  .phone {
+    position: relative;
+    width: 390px;
+    height: 844px;
+    flex: 0 0 auto;
+    border-radius: 56px;
+    overflow: hidden;
+    background:
+      radial-gradient(420px 320px at 20% 12%, rgba(139, 92, 246, 0.55), rgba(139, 92, 246, 0) 70%),
+      radial-gradient(520px 420px at 88% 74%, rgba(10, 132, 255, 0.42), rgba(10, 132, 255, 0) 72%),
+      radial-gradient(380px 340px at 40% 98%, rgba(255, 69, 58, 0.22), rgba(255, 69, 58, 0) 70%),
+      linear-gradient(168deg, #1d1738 0%, #0d0b18 58%, #05050a 100%);
+    box-shadow:
+      0 46px 130px rgba(0, 0, 0, 0.7),
+      0 0 0 1px rgba(255, 255, 255, 0.07),
+      inset 0 0 90px rgba(0, 0, 0, 0.45);
+  }
+
+  .phone::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 56px;
+    box-shadow: inset 0 0 0 10px #0a0a0e, inset 0 0 0 11px rgba(255, 255, 255, 0.05);
+    pointer-events: none;
+    z-index: 20;
+  }
+
+  .statusbar {
+    position: absolute;
+    top: 22px;
+    left: 34px;
+    right: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    z-index: 4;
+    transition: opacity 0.18s ease;
+  }
+
+  .statusbar.dim { opacity: 0; }
+
+  .status-icons { display: flex; align-items: flex-end; gap: 7px; }
+
+  .signal { display: flex; align-items: flex-end; gap: 1.5px; height: 11px; }
+  .signal i { width: 3px; border-radius: 1px; background: #fff; display: block; }
+
+  .battery {
+    width: 24px; height: 12px; border-radius: 4px;
+    background: rgba(255, 255, 255, 0.32);
+    padding: 1.5px;
+  }
+  .battery span { display: block; height: 100%; width: 74%; border-radius: 2.5px; background: #fff; }
+
+  /* ---------- the island ---------- */
+
+  .island-wrap {
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+  }
+
+  .island {
+    position: relative;
+    width: 126px;
+    height: 37px;
+    border-radius: 18.5px;
+    overflow: hidden;
+    background: linear-gradient(180deg, #101014 0%, #050506 100%);
+    box-shadow:
+      0 0 0 0.7px var(--line),
+      0 10px 26px rgba(0, 0, 0, 0.55);
+    transition:
+      width 0.52s cubic-bezier(0.32, 1.28, 0.36, 1),
+      height 0.52s cubic-bezier(0.32, 1.28, 0.36, 1),
+      border-radius 0.34s cubic-bezier(0.3, 0.9, 0.4, 1);
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .island:active { transform: scale(0.995); }
+
+  .layer {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: translateX(-50%) scale(0.96);
+    transition: opacity 0.19s ease, transform 0.26s cubic-bezier(0.3, 1.25, 0.4, 1);
+    pointer-events: none;
+  }
+
+  .layer.on { opacity: 1; transform: translateX(-50%) scale(1); }
+
+  /* ---------- shared bits ---------- */
+
+  .row { display: flex; align-items: center; }
+  .grow { flex: 1; min-width: 0; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col { display: flex; flex-direction: column; }
+  .pad { padding: 0 10px; width: 100%; }
+
+  .t-title { font-size: 14.5px; font-weight: 600; letter-spacing: 0.1px; }
+  .t-compact { font-size: 12px; font-weight: 600; letter-spacing: 0.1px; }
+  .t-sub { font-size: 11.5px; font-weight: 500; color: var(--text-2); }
+  .t-micro { font-size: 9px; font-weight: 600; letter-spacing: 0.45px; color: var(--text-3); }
+  .t-caption { font-size: 10px; font-weight: 500; color: var(--text-2); }
+  .t-num { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .t-clock { font-size: 26px; font-weight: 500; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+
+  .art {
+    width: var(--s); height: var(--s);
+    border-radius: calc(var(--s) * 0.3);
+    background: linear-gradient(135deg, #5b2edd, #e05b9c);
+    display: flex; align-items: center; justify-content: center;
+    gap: calc(var(--s) * 0.07);
+    flex: 0 0 auto;
+  }
+  .art span {
+    width: calc(var(--s) * 0.07);
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.9);
+  }
+  .art span:nth-child(1) { height: 30%; }
+  .art span:nth-child(2) { height: 54%; }
+  .art span:nth-child(3) { height: 40%; }
+
+  .wave { display: flex; align-items: center; gap: 3px; height: 16px; flex: 0 0 auto; }
+  .wave i {
+    display: block; width: 3px; height: 100%; border-radius: 99px;
+    background: rgba(255, 255, 255, 0.92);
+    transform-origin: center;
+    animation: wv 1.1s ease-in-out infinite;
+  }
+  .wave i:nth-child(1) { animation-delay: 0s; }
+  .wave i:nth-child(2) { animation-delay: 0.16s; }
+  .wave i:nth-child(3) { animation-delay: 0.32s; }
+  .wave i:nth-child(4) { animation-delay: 0.48s; }
+  .wave.paused i { animation-play-state: paused; opacity: 0.45; }
+
+  @keyframes wv {
+    0%, 100% { transform: scaleY(0.32); }
+    50% { transform: scaleY(1); }
+  }
+
+  .avatar {
+    width: var(--s); height: var(--s); border-radius: 50%;
+    background: #1a1a20;
+    display: flex; align-items: center; justify-content: center;
+    font-size: calc(var(--s) * 0.36); font-weight: 600; color: #fff;
+    flex: 0 0 auto;
+  }
+
+  .pill-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+
+  .puck {
+    width: var(--s); height: var(--s); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    flex: 0 0 auto;
+  }
+  .puck svg { width: 56%; height: 56%; }
+
+  .glyph-btn {
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent;
+  }
+  .glyph-btn svg { display: block; }
+
+  .bar { height: 3px; border-radius: 99px; background: rgba(255, 255, 255, 0.2); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 99px; background: #fff; transition: width 0.9s linear; }
+
+  .divider { height: 1px; background: var(--line); width: 100%; }
+
+  .ring { display: block; transform: rotate(0deg); }
+
+  /* ---------- expanded cards ---------- */
+
+  .card {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    padding: 15px 18px;
+  }
+
+  .card-music { gap: 0; }
+  .card-music .spacer { flex: 1; }
+
+  .controls-row { display: flex; align-items: center; justify-content: space-evenly; width: 100%; }
+
+  /* ---------- control panel ---------- */
+
+  .panel {
+    width: 380px;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .eyebrow {
+    font-size: 11px;
+    letter-spacing: 2.4px;
+    font-weight: 700;
+    color: var(--text-3);
+    text-transform: uppercase;
+  }
+
+  h1 {
+    margin: 6px 0 0;
+    font-size: 27px;
+    line-height: 1.2;
+    letter-spacing: -0.6px;
+    font-weight: 650;
+  }
+
+  .lede {
+    margin: 10px 0 0;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--text-2);
+  }
+
+  .state-readout {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 15px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid var(--line);
+  }
+
+  .state-name { font-size: 12.5px; font-weight: 700; letter-spacing: 1.4px; }
+  .state-detail { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+  .group { display: flex; flex-direction: column; gap: 8px; }
+
+  .group-label {
+    font-size: 10px;
+    letter-spacing: 1.6px;
+    font-weight: 700;
+    color: var(--text-3);
+    text-transform: uppercase;
+  }
+
+  .chips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+  .chip {
+    all: unset;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 38px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.07);
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.82);
+    transition: background 0.18s ease, color 0.18s ease, transform 0.12s ease;
+  }
+
+  .chip:hover { background: rgba(255, 255, 255, 0.11); }
+  .chip:active { transform: scale(0.97); }
+  .chip.on { background: rgba(48, 209, 88, 0.16); color: #6ff397; box-shadow: inset 0 0 0 1px rgba(48, 209, 88, 0.3); }
+  .chip.primary { background: rgba(139, 92, 246, 0.2); color: #c9b8ff; box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.35); }
+
+  .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+  .hint {
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-3);
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+
+  .hint code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  @media (max-width: 900px) {
+    body { padding: 24px 16px 40px; gap: 32px; align-items: flex-start; }
+    .phone { transform: scale(0.88); transform-origin: top center; margin-bottom: -90px; }
+    .panel { width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<div class="phone" id="phone">
+  <div class="statusbar" id="statusbar">
+    <span>9:41</span>
+    <span class="status-icons">
+      <span class="signal"><i style="height:3px"></i><i style="height:4.5px"></i><i style="height:6.5px"></i><i style="height:9px"></i></span>
+      <span class="battery"><span></span></span>
+    </span>
+  </div>
+
+  <div class="island-wrap">
+    <div class="island" id="island" role="button" tabindex="0" aria-label="Dynamic Island">
+      <div class="layer" id="layer0"></div>
+      <div class="layer" id="layer1"></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div>
+    <div class="eyebrow">Kotlin · Jetpack Compose · preview</div>
+    <h1>Dynamic Island</h1>
+    <p class="lede">
+      Every state below is driven by the same reducer as the Android source:
+      activities are ranked by priority, one may open, and two peers may share the pill.
+    </p>
+  </div>
+
+  <div class="state-readout">
+    <div>
+      <div class="state-name" id="stateName">COLLAPSED</div>
+      <div class="state-detail" id="stateDetail">no live activities</div>
+    </div>
+    <div class="state-detail" id="stateSize">126 × 37</div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Live activities</div>
+    <div class="chips" id="activityChips"></div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Island</div>
+    <div class="chips" id="islandChips"></div>
+  </div>
+
+  <p class="hint">
+    Click the island to toggle it, or drag up / down. This page mirrors
+    <code>DynamicIsland.kt</code> — the size spring is under-damped (ratio 0.74) on purpose, so the
+    pill overshoots a hair before it settles.
+  </p>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  /* ---------- model, mirroring IslandActivity.kt ---------- */
+
+  const ACTIVITIES = {
+    music:    { label: "Music",    priority: 60,  compactW: 246, expandedH: 174 },
+    call:     { label: "Call",     priority: 100, compactW: 238, expandedH: 196 },
+    timer:    { label: "Timer",    priority: 55,  compactW: 152, expandedH: 184 },
+    charging: { label: "Charging", priority: 20,  compactW: 138, expandedH: 140 },
+    nav:      { label: "Maps",     priority: 80,  compactW: 216, expandedH: 184 },
+    unlock:   { label: "Face ID",  priority: 10,  compactW: 132, expandedH: 128, transient: 1800 },
+  };
+
+  const SPLIT_MIN_PRIORITY = 50;
+  const COLLAPSED = { w: 126, h: 37, r: 18.5 };
+  const SPLIT = { w: 340, h: 37, r: 18.5 };
+  const EXPANDED_WIDTH = 371;
+  const EXPANDED_RADIUS = 44;
+
+  const data = {
+    music: { title: "Kaam 25", artist: "Divine • Gully Gang", playing: true, elapsed: 42, duration: 214 },
+    call: { name: "Ananya Iyer", incoming: true, connected: 0 },
+    timer: { total: 600, remaining: 412, running: true },
+    charging: { level: 24, fast: true },
+    nav: { distance: "300 m", maneuver: "Turn right", road: "onto MG Road", eta: "12 min", arrival: "6:42 PM" },
+  };
+
+  const state = { activities: [], expandedId: null };
+
+  const ordered = () =>
+    state.activities
+      .map((id) => ({ id, ...ACTIVITIES[id] }))
+      .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id));
+
+  function presentation() {
+    const list = ordered();
+    if (state.expandedId && list.some((a) => a.id === state.expandedId)) {
+      return { type: "expanded", activity: state.expandedId };
+    }
+    if (list.length === 0) return { type: "collapsed" };
+    if (list.length > 1 && list[1].priority >= SPLIT_MIN_PRIORITY) {
+      return { type: "split", lead: list[0].id, trail: list[1].id };
+    }
+    return { type: "compact", activity: list[0].id };
+  }
+
+  function sizeFor(p) {
+    if (p.type === "collapsed") return COLLAPSED;
+    if (p.type === "split") return SPLIT;
+    if (p.type === "compact") {
+      return { w: ACTIVITIES[p.activity].compactW, h: 37, r: 18.5 };
+    }
+    return { w: EXPANDED_WIDTH, h: ACTIVITIES[p.activity].expandedH, r: EXPANDED_RADIUS };
+  }
+
+  function keyFor(p) {
+    if (p.type === "collapsed") return "collapsed";
+    if (p.type === "split") return `split:${p.lead}+${p.trail}`;
+    return `${p.type}:${p.activity}`;
+  }
+
+  /* ---------- actions ---------- */
+
+  const post = (id) => {
+    if (!state.activities.includes(id)) state.activities.push(id);
+    render();
+  };
+
+  const dismiss = (id) => {
+    state.activities = state.activities.filter((a) => a !== id);
+    if (state.expandedId === id) state.expandedId = null;
+    render();
+  };
+
+  const toggleActivity = (id) => {
+    if (state.activities.includes(id)) {
+      dismiss(id);
+    } else {
+      post(id);
+      scheduleTransient(id);
+    }
+  };
+
+  const expand = (id) => {
+    const target = id || (ordered()[0] && ordered()[0].id);
+    if (target && state.activities.includes(target)) state.expandedId = target;
+    render();
+  };
+
+  const collapse = () => { state.expandedId = null; render(); };
+
+  const clear = () => { state.activities = []; state.expandedId = null; render(); };
+
+  const toggleIsland = () => {
+    const p = presentation();
+    if (p.type === "expanded") collapse();
+    else if (p.type === "split") expand(p.lead);
+    else if (p.type === "compact") expand(p.activity);
+    else expand();
+  };
+
+  /* ---------- svg glyphs ---------- */
+
+  const svg = (body, extra = "") =>
+    `<svg viewBox="0 0 24 24" fill="currentColor" ${extra} aria-hidden="true">${body}</svg>`;
+
+  const GLYPH = {
+    play: svg('<path d="M8 5.2v13.6L19 12z"/>'),
+    pause: svg('<rect x="7.4" y="5.2" width="3.4" height="13.6" rx="1.3"/><rect x="13.2" y="5.2" width="3.4" height="13.6" rx="1.3"/>'),
+    prev: svg('<path d="M18.4 5.2v13.6L8.6 12z"/><rect x="5.4" y="5.2" width="2.2" height="13.6" rx="1.1"/>'),
+    next: svg('<path d="M5.6 5.2v13.6L15.4 12z"/><rect x="16.4" y="5.2" width="2.2" height="13.6" rx="1.1"/>'),
+    phone: svg('<path d="M6.9 3.4c.93 0 1.73.66 1.9 1.58l.55 2.9c.12.63-.11 1.27-.6 1.68l-1.3 1.1c1.03 2.2 2.8 3.97 5 5l1.1-1.3c.41-.49 1.05-.72 1.68-.6l2.9.55c.92.17 1.58.97 1.58 1.9v2.1c0 1.05-.85 1.9-1.9 1.9C10.4 20.2 3.8 13.6 3.8 5.3c0-1.05.85-1.9 1.9-1.9z"/>'),
+    phoneDown: svg('<g transform="rotate(135 12 12)"><path d="M6.9 3.4c.93 0 1.73.66 1.9 1.58l.55 2.9c.12.63-.11 1.27-.6 1.68l-1.3 1.1c1.03 2.2 2.8 3.97 5 5l1.1-1.3c.41-.49 1.05-.72 1.68-.6l2.9.55c.92.17 1.58.97 1.58 1.9v2.1c0 1.05-.85 1.9-1.9 1.9C10.4 20.2 3.8 13.6 3.8 5.3c0-1.05.85-1.9 1.9-1.9z"/></g>'),
+    bolt: svg('<path d="M13.4 2.4 6.2 13.5h4.5l-1.3 8.1 8-11.6h-4.8z"/>'),
+    check: svg('<path d="M4.6 12.6l4.4 4.4 10-10" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'),
+    arrowUp: svg('<path d="M12 20V4.6M5.8 10.8 12 4.6l6.2 6.2" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>'),
+    arrowRight: svg('<path d="M4 12h15M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>'),
+    stop: svg('<rect x="7" y="7" width="10" height="10" rx="2.6"/>'),
+  };
+
+  /* ---------- content builders ---------- */
+
+  const el = (tag, cls, style, html) => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (style) node.setAttribute("style", style);
+    if (html !== undefined) node.innerHTML = html;
+    return node;
+  };
+
+  const mmss = (seconds) => {
+    const s = Math.max(0, seconds);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+
+  const artwork = (size) =>
+    `<span class="art" style="--s:${size}px"><span></span><span></span><span></span></span>`;
+
+  const wave = (playing, height = 16) =>
+    `<span class="wave ${playing ? "" : "paused"}" style="height:${height}px"><i></i><i></i><i></i><i></i></span>`;
+
+  function ring(pct, size, stroke, color) {
+    const r = (size - stroke) / 2;
+    const c = 2 * Math.PI * r;
+    const offset = c * (1 - Math.max(0, Math.min(1, pct)));
+    return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+      <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="${stroke}"/>
+      <circle data-ring cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+        stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${offset}"
+        transform="rotate(-90 ${size / 2} ${size / 2})" style="transition:stroke-dashoffset .9s linear"/>
+    </svg>`;
+  }
+
+  const pucks = (a, b) =>
+    `<span class="pill-actions">
+      <span class="puck" style="--s:${a.size}px;background:${a.color};color:#fff">${a.glyph}</span>
+      <span class="puck" style="--s:${b.size}px;background:${b.color};color:#fff">${b.glyph}</span>
+    </span>`;
+
+  // --- music ---
+  function musicCompact() {
+    const d = data.music;
+    return `<div class="row pad" style="gap:8px">
+      ${artwork(22)}
+      <div class="grow ellipsis t-compact">${d.title}</div>
+      ${wave(d.playing, 16)}
+    </div>`;
+  }
+
+  function musicExpanded() {
+    const d = data.music;
+    const pct = (d.elapsed / d.duration) * 100;
+    return `<div class="card card-music">
+      <div class="row" style="gap:12px">
+        ${artwork(46)}
+        <div class="col grow" style="gap:2px">
+          <div class="t-title ellipsis">${d.title}</div>
+          <div class="t-sub ellipsis">${d.artist}</div>
+        </div>
+        ${wave(d.playing, 20)}
+      </div>
+      <div class="spacer"></div>
+      <div class="bar"><i data-music-bar style="width:${pct}%"></i></div>
+      <div class="row" style="justify-content:space-between;margin-top:6px">
+        <span class="t-micro" data-music-elapsed>${mmss(d.elapsed)}</span>
+        <span class="t-micro" data-music-left>-${mmss(d.duration - d.elapsed)}</span>
+      </div>
+      <div class="controls-row" style="margin-top:9px">
+        <span class="glyph-btn" style="width:34px;height:34px;color:rgba(255,255,255,.69)">${GLYPH.prev}</span>
+        <span class="glyph-btn" style="width:42px;height:42px;background:#17171b;color:#fff">${withSize(d.playing ? GLYPH.pause : GLYPH.play, 17)}</span>
+        <span class="glyph-btn" style="width:34px;height:34px;color:rgba(255,255,255,.69)">${GLYPH.next}</span>
+      </div>
+    </div>`;
+  }
+
+  function withSize(svgMarkup, px) {
+    return svgMarkup.replace("<svg ", `<svg width="${px}" height="${px}" `);
+  }
+
+  // --- call ---
+  const initials = (name) =>
+    name.trim().split(/\s+/).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+
+  function callCompact() {
+    const d = data.call;
+    return `<div class="row pad" style="gap:8px">
+      <span class="avatar" style="--s:24px">${initials(d.name)}</span>
+      <div class="col grow" style="gap:1px">
+        <div class="t-compact ellipsis">${d.name}</div>
+        <div class="t-micro" style="letter-spacing:.2px" data-call-compact>${d.incoming ? "Incoming call" : mmss(d.connected)}</div>
+      </div>
+      ${pucks(
+        { glyph: withSize(GLYPH.phoneDown, 12), color: "var(--red)", size: 26 },
+        { glyph: withSize(GLYPH.phone, 12), color: "var(--green)", size: 26 }
+      )}
+    </div>`;
+  }
+
+  function callExpanded() {
+    const d = data.call;
+    return `<div class="card" style="align-items:center;padding:16px 20px">
+      <div class="t-micro" style="letter-spacing:1.2px">${d.incoming ? "INCOMING CALL" : "ON CALL"}</div>
+      <div class="t-title" style="margin-top:6px">${d.name}</div>
+      <div class="t-sub" style="margin-top:2px" data-call-expanded>${d.incoming ? "Mobile" : mmss(d.connected)}</div>
+      <div style="flex:1"></div>
+      <div class="row" style="width:100%;justify-content:space-evenly;align-items:flex-start">
+        <div class="col" style="align-items:center;gap:6px">
+          <span class="puck" style="--s:52px;background:var(--red);color:#fff">${withSize(GLYPH.phoneDown, 22)}</span>
+          <span class="t-caption">Decline</span>
+        </div>
+        <div class="col" style="align-items:center;gap:6px">
+          <span class="puck" style="--s:52px;background:var(--green);color:#fff">${withSize(GLYPH.phone, 22)}</span>
+          <span class="t-caption">${d.incoming ? "Accept" : "Speaker"}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // --- timer ---
+  function timerCompact() {
+    const d = data.timer;
+    return `<div class="row pad" style="gap:9px">
+      <span style="position:relative;display:flex;align-items:center;justify-content:center">
+        ${ring(d.remaining / d.total, 22, 2, "var(--amber)")}
+        <span style="position:absolute;color:var(--amber);display:flex">${withSize(GLYPH.stop, 6)}</span>
+      </span>
+      <span class="t-num" data-timer-text>${mmss(d.remaining)}</span>
+    </div>`;
+  }
+
+  function timerExpanded() {
+    const d = data.timer;
+    return `<div class="card" style="align-items:center;padding:14px 20px">
+      <div class="t-micro" style="letter-spacing:1.2px">${d.running ? "TIMER" : "PAUSED"}</div>
+      <div style="position:relative;display:flex;align-items:center;justify-content:center;margin-top:8px">
+        ${ring(d.remaining / d.total, 92, 4, "var(--amber)")}
+        <div class="col" style="position:absolute;align-items:center;gap:2px">
+          <span class="t-clock" data-timer-text>${mmss(d.remaining)}</span>
+          <span class="t-micro">of ${mmss(d.total)}</span>
+        </div>
+      </div>
+      <div style="flex:1"></div>
+      <div class="row" style="width:100%;justify-content:space-evenly">
+        <span class="glyph-btn" style="width:38px;height:38px;background:#17171b;color:#fff">${withSize(d.running ? GLYPH.pause : GLYPH.play, 14)}</span>
+        <span class="glyph-btn" style="width:38px;height:38px;background:#17171b;color:var(--red)">${withSize(GLYPH.stop, 13)}</span>
+      </div>
+    </div>`;
+  }
+
+  // --- charging ---
+  function chargingCompact() {
+    const d = data.charging;
+    return `<div class="row pad" style="gap:6px">
+      <span style="color:var(--green);display:flex">${withSize(GLYPH.bolt, 14)}</span>
+      <span class="t-num">${d.level}%</span>
+      <span class="grow"></span>
+      <span class="t-micro" style="color:var(--green);letter-spacing:.8px">${d.fast ? "FAST" : "CHG"}</span>
+    </div>`;
+  }
+
+  function chargingExpanded() {
+    const d = data.charging;
+    return `<div class="card" style="align-items:center;justify-content:center;padding:16px 20px">
+      <div class="row" style="align-items:flex-end">
+        <span class="t-clock">${d.level}</span>
+        <span class="t-title" style="margin:0 0 5px 1px">%</span>
+      </div>
+      <div class="row" style="width:80%;margin-top:10px;align-items:center">
+        <span style="flex:1;height:22px;border:1px solid rgba(255,255,255,.48);border-radius:7px;padding:2.5px;display:flex">
+          <span style="width:${d.level}%;height:100%;background:var(--green);border-radius:5px"></span>
+        </span>
+        <span style="width:2.5px;height:8px;margin-left:2px;border-radius:2px;background:rgba(255,255,255,.48)"></span>
+      </div>
+      <div class="row" style="gap:5px;margin-top:10px;color:var(--green)">
+        <span style="display:flex">${withSize(GLYPH.bolt, 11)}</span>
+        <span class="t-caption" style="color:var(--green)">${d.fast ? "Fast charging" : "Charging"}</span>
+      </div>
+    </div>`;
+  }
+
+  // --- navigation ---
+  const maneuverTile = (size) =>
+    `<span style="width:${size}px;height:${size}px;border-radius:${size * 0.32}px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;flex:0 0 auto">
+      ${withSize(GLYPH.arrowUp, Math.round(size * 0.58))}
+    </span>`;
+
+  function navCompact() {
+    const d = data.nav;
+    return `<div class="row pad" style="gap:8px">
+      ${maneuverTile(23)}
+      <span class="t-compact">${d.distance}</span>
+      <span class="grow"></span>
+      <span class="t-micro" style="letter-spacing:.2px">${d.eta}</span>
+    </div>`;
+  }
+
+  function navExpanded() {
+    const d = data.nav;
+    return `<div class="card" style="padding:16px 18px">
+      <div class="row" style="gap:12px">
+        ${maneuverTile(42)}
+        <div class="col grow" style="gap:3px">
+          <div class="row" style="gap:6px;align-items:baseline">
+            <span class="t-title">${d.distance}</span>
+            <span class="t-sub ellipsis">${d.maneuver}</span>
+          </div>
+          <div class="t-sub ellipsis">${d.road}</div>
+        </div>
+      </div>
+      <div style="flex:1"></div>
+      <div class="divider"></div>
+      <div class="row" style="justify-content:space-between;margin-top:10px">
+        <div class="row" style="gap:6px;color:var(--blue)">
+          <span style="display:flex">${withSize(GLYPH.arrowRight, 12)}</span>
+          <span class="t-caption" style="color:var(--text-2)">${d.eta} · ${d.arrival}</span>
+        </div>
+        <span style="padding:7px 12px;border-radius:99px;background:#17171b;font-size:11px;font-weight:600;color:var(--red)">End</span>
+      </div>
+    </div>`;
+  }
+
+  // --- unlock ---
+  const checkBadge = (size) =>
+    `<span style="width:${size}px;height:${size}px;border-radius:50%;background:var(--green);color:#fff;display:flex;align-items:center;justify-content:center;flex:0 0 auto">
+      ${withSize(GLYPH.check, Math.round(size * 0.5))}
+    </span>`;
+
+  function unlockCompact() {
+    return `<div class="row" style="gap:8px;padding:0 12px">
+      ${checkBadge(22)}
+      <span class="t-compact">Unlocked</span>
+    </div>`;
+  }
+
+  function unlockExpanded() {
+    return `<div class="card" style="align-items:center;justify-content:center;gap:8px;padding:14px">
+      ${checkBadge(46)}
+      <span class="t-micro">Face ID</span>
+    </div>`;
+  }
+
+  function compactContent(id) {
+    switch (id) {
+      case "music": return musicCompact();
+      case "call": return callCompact();
+      case "timer": return timerCompact();
+      case "charging": return chargingCompact();
+      case "nav": return navCompact();
+      case "unlock": return unlockCompact();
+      default: return "";
+    }
+  }
+
+  function expandedContent(id) {
+    switch (id) {
+      case "music": return musicExpanded();
+      case "call": return callExpanded();
+      case "timer": return timerExpanded();
+      case "charging": return chargingExpanded();
+      case "nav": return navExpanded();
+      case "unlock": return unlockExpanded();
+      default: return "";
+    }
+  }
+
+  function collapsedContent() {
+    return `<div class="row" style="gap:9px">
+      <span style="width:13px;height:13px;border-radius:50%;background:radial-gradient(circle at 34% 30%, #26303f, #07090d 72%);box-shadow:0 0 0 .6px rgba(255,255,255,.17)"></span>
+      <span style="width:6px;height:6px;border-radius:50%;background:#121216;box-shadow:0 0 0 .5px rgba(255,255,255,.12)"></span>
+    </div>`;
+  }
+
+  function splitContent(lead, trail) {
+    return `<div class="row" style="width:100%;padding:0 12px">
+      <div class="grow" style="display:flex;justify-content:flex-start">${compactContent(lead)}</div>
+      <div style="width:16px;flex:0 0 auto"></div>
+      <div class="grow" style="display:flex;justify-content:flex-end">${compactContent(trail)}</div>
+    </div>`;
+  }
+
+  /* ---------- rendering ---------- */
+
+  const island = document.getElementById("island");
+  const layers = [document.getElementById("layer0"), document.getElementById("layer1")];
+  const statusbar = document.getElementById("statusbar");
+  const stateName = document.getElementById("stateName");
+  const stateDetail = document.getElementById("stateDetail");
+  const stateSize = document.getElementById("stateSize");
+
+  let currentKey = null;
+  let activeLayer = 0;
+
+  function render() {
+    const p = presentation();
+    const size = sizeFor(p);
+
+    island.style.width = `${size.w}px`;
+    island.style.height = `${size.h}px`;
+    island.style.borderRadius = `${size.r}px`;
+    statusbar.classList.toggle("dim", p.type === "expanded");
+
+    const key = keyFor(p);
+    if (key !== currentKey) {
+      const nextIndex = 1 - activeLayer;
+      const nextLayer = layers[nextIndex];
+      const inner =
+        p.type === "collapsed" ? collapsedContent() :
+        p.type === "split" ? splitContent(p.lead, p.trail) :
+        p.type === "compact" ? compactContent(p.activity) :
+        expandedContent(p.activity);
+
+      nextLayer.style.width = `${size.w}px`;
+      nextLayer.innerHTML = inner;
+      nextLayer.classList.add("on");
+      layers[activeLayer].classList.remove("on");
+      activeLayer = nextIndex;
+      currentKey = key;
+    } else {
+      layers[activeLayer].style.width = `${size.w}px`;
+    }
+
+    updateReadout(p, size);
+    updateLive();
+    renderControls();
+  }
+
+  function updateReadout(p, size) {
+    if (p.type === "collapsed") {
+      stateName.textContent = "COLLAPSED";
+      stateDetail.textContent = "no live activities";
+    } else if (p.type === "compact") {
+      stateName.textContent = `COMPACT · ${p.activity.toUpperCase()}`;
+      stateDetail.textContent = `priority ${ACTIVITIES[p.activity].priority}`;
+    } else if (p.type === "expanded") {
+      stateName.textContent = `EXPANDED · ${p.activity.toUpperCase()}`;
+      stateDetail.textContent = `priority ${ACTIVITIES[p.activity].priority}`;
+    } else {
+      stateName.textContent = "SPLIT";
+      stateDetail.textContent = `${p.lead.toUpperCase()} + ${p.trail.toUpperCase()}`;
+    }
+    stateSize.textContent = `${Math.round(size.w)} × ${Math.round(size.h)}`;
+  }
+
+  function updateLive() {
+    const d = data.music;
+    const pct = Math.min(100, (d.elapsed / d.duration) * 100);
+    const bar = island.querySelector("[data-music-bar]");
+    if (bar) bar.style.width = `${pct}%`;
+    const elapsed = island.querySelector("[data-music-elapsed]");
+    if (elapsed) elapsed.textContent = mmss(d.elapsed);
+    const left = island.querySelector("[data-music-left]");
+    if (left) left.textContent = `-${mmss(d.duration - d.elapsed)}`;
+
+    island.querySelectorAll("[data-timer-text]").forEach((node) => {
+      node.textContent = mmss(data.timer.remaining);
+    });
+
+    const callCompact = island.querySelector("[data-call-compact]");
+    if (callCompact) {
+      callCompact.textContent = data.call.incoming ? "Incoming call" : mmss(data.call.connected);
+    }
+    const callExpanded = island.querySelector("[data-call-expanded]");
+    if (callExpanded) {
+      callExpanded.textContent = data.call.incoming ? "Mobile" : mmss(data.call.connected);
+    }
+
+    island.querySelectorAll("[data-ring]").forEach((circle) => {
+      const r = Number(circle.getAttribute("r"));
+      const c = 2 * Math.PI * r;
+      circle.setAttribute("stroke-dashoffset", String(c * (1 - data.timer.remaining / data.timer.total)));
+    });
+  }
+
+  /* ---------- controls ---------- */
+
+  const activityChips = document.getElementById("activityChips");
+  const islandChips = document.getElementById("islandChips");
+
+  function chip(label, opts, onClick) {
+    const button = document.createElement("button");
+    button.className = `chip ${opts.on ? "on" : ""} ${opts.primary ? "primary" : ""}`;
+    button.innerHTML = `${opts.on ? '<span class="dot"></span>' : ""}<span>${label}</span>`;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function renderControls() {
+    const p = presentation();
+
+    activityChips.innerHTML = "";
+    Object.entries(ACTIVITIES).forEach(([id, meta]) => {
+      activityChips.appendChild(
+        chip(meta.label, { on: state.activities.includes(id) }, () => toggleActivity(id))
+      );
+    });
+
+    islandChips.innerHTML = "";
+    islandChips.appendChild(chip("Open", { primary: p.type === "expanded" }, () => expand()));
+    islandChips.appendChild(chip("Close", {}, collapse));
+    islandChips.appendChild(chip("Clear", {}, clear));
+  }
+
+  /* ---------- gestures ---------- */
+
+  island.addEventListener("click", toggleIsland);
+  island.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleIsland();
+    }
+  });
+
+  let dragStart = null;
+  island.addEventListener("pointerdown", (event) => {
+    dragStart = { y: event.clientY };
+    island.setPointerCapture(event.pointerId);
+  });
+  island.addEventListener("pointerup", (event) => {
+    if (!dragStart) return;
+    const delta = event.clientY - dragStart.y;
+    dragStart = null;
+    if (delta > 28) collapse();
+    else if (delta < -28) expand();
+  });
+  island.addEventListener("pointercancel", () => { dragStart = null; });
+
+  /* ---------- clock ---------- */
+
+  setInterval(() => {
+    let changed = false;
+
+    if (state.activities.includes("music") && data.music.playing) {
+      data.music.elapsed = (data.music.elapsed + 1) % data.music.duration;
+      changed = true;
+    }
+
+    if (state.activities.includes("timer") && data.timer.running) {
+      data.timer.remaining -= 1;
+      if (data.timer.remaining <= 0) {
+        data.timer.remaining = data.timer.total;
+        dismiss("timer");
+      }
+      changed = true;
+    }
+
+    if (state.activities.includes("call") && !data.call.incoming) {
+      data.call.connected += 1;
+      changed = true;
+    }
+
+    if (changed) updateLive();
+  }, 1000);
+
+  /* ---------- transient activities, mirroring IslandHost ---------- */
+
+  const transientTimers = new Map();
+
+  function scheduleTransient(id) {
+    const ttl = ACTIVITIES[id].transient;
+    if (!ttl) return;
+    const existing = transientTimers.get(id);
+    if (existing) clearTimeout(existing);
+    transientTimers.set(id, setTimeout(() => {
+      transientTimers.delete(id);
+      dismiss(id);
+    }, ttl));
+  }
+
+  /* ---------- boot ---------- */
+
+  clear();
+  statusbar.classList.remove("dim");
+  render();
+})();
+</script>
+</body>
+</html>
