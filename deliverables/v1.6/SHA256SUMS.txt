@@ -1,0 +1,2 @@
+ca9dc400e827ec295f0ff4af7594a098c0c0cffed757c9bec311632269beecd4  /tmp/Dynamic-Island/deliverables/v1.6/dynamic-island-v1.6.apk
+449cf6830f4c90d2bdc18843cdd4cf9ebccb80ee71f0ca88edc09581c8015c54  /tmp/Dynamic-Island/app/build/outputs/apk/debug/app-debug.apk

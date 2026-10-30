@@ -1,0 +1,591 @@
+package com.dynamicisland.engine.ui
+
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.dynamicisland.core.geometry.*
+import com.dynamicisland.core.motion.MetaballGeometry
+import com.dynamicisland.core.motion.ScrubCollapseController
+import com.dynamicisland.core.privacy.LockStatePrivacyPolicy
+import com.dynamicisland.engine.core.model.*
+import com.dynamicisland.engine.settings.BehaviorOptions
+import com.dynamicisland.engine.ui.components.AudioWaveformEqualizer
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.compose.ui.platform.LocalContext
+import com.dynamicisland.core.media.WaveformSourcePolicy
+import com.dynamicisland.core.system.MiniStatusBarPolicy
+import com.dynamicisland.engine.ui.icons.IslandGlyph
+import com.dynamicisland.engine.ui.util.rememberMiniBarClock
+
+/**
+ * Flagship Compact & Minimal Dynamic Island Capsule.
+ *
+ * Implements:
+ * - Zero internal margin against the physical sensor cutout & concentric outer rounding
+ * - Apple-Parity single-tap `widgetURL` deep-link vs. long-press expansion with `0.985f` press compression
+ * - `.keylineTint` 1dp adaptive brand/artwork perimeter border
+ * - 2D Metaball ferrofluid droplet detachment bridge shader (`MetaballGeometry`)
+ * - Width-limited landscape 28dp circular condensation (`isDynamicIslandLimitedInWidth`)
+ * - Stale activity dimming (`activity.isStale`) and Smart Lock Screen privacy redaction
+ * - Optional Idle Mini-Status Bar mode (live clock + battery/connectivity glyph)
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun FixedIslandCapsule(
+    state: IslandState,
+    playback: MediaPlaybackSnapshot,
+    locked: Boolean,
+    rotation: Float,
+    onOpen: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onPlayPause: () -> Unit,
+    options: BehaviorOptions = BehaviorOptions(),
+    onGesture: ((GestureAction) -> Unit)? = null,
+    secondary: Boolean = false,
+    cornerRadius: Dp? = null,
+    microphoneActive: Boolean = false,
+    cameraActive: Boolean = false,
+    isLandscape: Boolean = false,
+    /**
+     * Gap G4 — real battery and signal data for the immersive mini status bar.
+     * Null keeps the previous glyph-only behaviour for the preview fixtures.
+     */
+    miniStatusBar: MiniStatusBarSnapshot? = null
+) {
+    val context = LocalContext.current
+    // RECORD_AUDIO gates any real FFT path; without it the policy can only ever
+    // resolve to synthetic or flat. Checked once per composition, not per frame.
+    val hasRecordAudioPermission = remember(context) {
+        context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val activity = when (state) {
+            is IslandState.Compact -> state.activity
+            is IslandState.Minimal -> if (secondary) state.secondary else state.primary
+            is IslandState.Expanded -> state.activity
+            else -> null
+        }
+        val media = activity?.kind == ActivityKind.MEDIA_SESSION
+        val bitmap = if (!locked && media) (activity?.compactLeading as? IslandSlotContent.Icon)?.iconBitmap else null
+        val image = remember(bitmap) { bitmap?.asImageBitmap() }
+        val symbol = when {
+            locked -> IslandSymbol.BELL
+            state is IslandState.AlertPeek -> (state.alert.leadingSlot as? IslandSlotContent.Symbol)?.symbol ?: IslandSymbol.BELL
+            activity?.kind in listOf(ActivityKind.LIVE_CALL, ActivityKind.RINGING_CALL, ActivityKind.EMERGENCY_CALL) -> IslandSymbol.PHONE
+            activity?.kind == ActivityKind.LIVE_TIMER -> IslandSymbol.TIMER
+            activity?.kind == ActivityKind.LIVE_STOPWATCH -> IslandSymbol.TIMER
+            activity?.kind == ActivityKind.NAVIGATION -> IslandSymbol.NAVIGATION
+            activity?.kind == ActivityKind.LIVE_JOURNEY -> IslandSymbol.DELIVERY
+            activity?.kind == ActivityKind.FILE_DOWNLOAD -> IslandSymbol.DOWNLOAD
+            activity?.kind == ActivityKind.BATTERY_CHARGING -> IslandSymbol.BOLT
+            activity?.kind == ActivityKind.ACCESSORY_BATTERY -> IslandSymbol.HEADSET
+            media -> IslandSymbol.MUSIC_NOTE
+            else -> IslandSymbol.BELL
+        }
+
+        val dispatch by rememberUpdatedState(onGesture)
+        val currentOptions by rememberUpdatedState(options)
+        val visibleMedia by rememberUpdatedState(media)
+        val hasActivity by rememberUpdatedState(activity != null || state is IslandState.AlertPeek)
+        var drag by remember { mutableFloatStateOf(0f) }
+
+        fun route(action: GestureAction) {
+            val allowed = GesturePolicy.allowed(action, visibleMedia, locked)
+            if (allowed == GestureAction.NONE) return
+            if (dispatch != null) dispatch?.invoke(allowed)
+            else if (allowed == GestureAction.OPEN_DASHBOARD || allowed == GestureAction.OPEN_SOURCE) onOpen()
+        }
+
+        val parsedKeylineColor = remember(activity?.keylineTintHex, options.enableKeylineTint, options.appearance) {
+            when {
+                options.appearance == AppearancePreset.HIGH_CONTRAST -> Color.White
+                options.appearance == AppearancePreset.LIQUID_GLASS -> Color.White.copy(alpha = 0.38f)
+                options.enableKeylineTint && activity?.keylineTintHex != null ->
+                    parseHexColor(activity.keylineTintHex, Color.White.copy(alpha = 0.28f)).copy(alpha = 0.65f)
+                else -> Color.Transparent
+            }
+        }
+
+        val tint = when {
+            activity?.keylineTintHex != null && options.enableKeylineTint ->
+                parseHexColor(activity.keylineTintHex, Color.White)
+            options.appearance == AppearancePreset.SOFT_ACCENT -> Color(0xFFB7D5C3)
+            else -> Color.White
+        }
+
+        val duration = if (options.reducedMotion || !android.animation.ValueAnimator.areAnimatorsEnabled()) 0 else when (options.motion) {
+            MotionPreset.NONE -> 0
+            MotionPreset.GENTLE -> 180
+            MotionPreset.RESPONSIVE -> 90
+        }
+
+        val isLandscape = rotation == 90f || rotation == -90f
+        val widthLimitedSpec = remember(isLandscape, options.landscapeBehavior) {
+            if (options.landscapeBehavior == LandscapeBehavior.ADAPTIVE_LIMITED_WIDTH) {
+                ExpandedRegionLayoutSolver.resolveWidthLimitedCompact(isLandscape = isLandscape, availableCapsuleWidthDp = if (isLandscape) 96f else 125f)
+            } else {
+                ExpandedRegionLayoutSolver.WidthLimitedCompactSpec(false, 34f, true, true, false)
+            }
+        }
+
+        val interactionSource = remember { MutableInteractionSource() }
+        val isPressed by interactionSource.collectIsPressedAsState()
+        val pressScale by animateFloatAsState(
+            targetValue = if (isPressed && !options.reducedMotion) ScrubCollapseController.PRE_EXPANSION_PRESS_SCALE else 1f,
+            animationSpec = tween(durationMillis = 60),
+            label = "PressCompressionScale"
+        )
+
+        val staleAlpha = if (activity?.isStale == true) 0.52f else 1f
+        val shape = if (cornerRadius != null) RoundedCornerShape(cornerRadius) else RoundedCornerShape(percent = 50)
+
+        val a11yDescription = remember(locked, secondary, activity, state) {
+            if (locked && activity != null) {
+                val redacted = LockStatePrivacyPolicy.resolveSummaryForKind(
+                    kindName = activity.kind.name,
+                    originalTitle = activity.title,
+                    originalSubtitle = activity.subtitle,
+                    isKeyguardLocked = true
+                )
+                "Dynamic Island. ${redacted.title}. ${redacted.subtitle}"
+            } else if (locked) {
+                "Dynamic Island. Unlock to open controls"
+            } else if (secondary) {
+                "Secondary activity. ${activity?.title ?: "Open controls"}"
+            } else if (activity != null) {
+                val staleSuffix = if (activity.isStale) ", update delayed" else ""
+                "Primary island. ${activity.title}$staleSuffix"
+            } else {
+                "Primary island. Open controls"
+            }
+        }
+
+        // 2D Metaball Ferrofluid Neck Bridge Canvas when Minimal state is active
+        if (!secondary && state is IslandState.Minimal && options.enableMetaballShader) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val neck = MetaballGeometry.computeBridgeNeck(
+                    primaryRightX = size.width * 0.88f,
+                    dropletLeftX = size.width * 0.98f,
+                    centerY = size.height / 2f,
+                    dropletDiameterPx = size.height,
+                    snapThresholdPx = size.width * 0.25f
+                )
+                if (neck.isConnected && neck.pinchHeight > 1f) {
+                    val path = Path().apply {
+                        moveTo(neck.leftAnchorX, neck.centerY - neck.pinchHeight * 0.6f)
+                        quadraticBezierTo(
+                            (neck.leftAnchorX + neck.rightAnchorX) / 2f,
+                            neck.centerY - neck.pinchHeight * 0.25f,
+                            neck.rightAnchorX,
+                            neck.centerY - neck.pinchHeight * 0.5f
+                        )
+                        lineTo(neck.rightAnchorX, neck.centerY + neck.pinchHeight * 0.5f)
+                        quadraticBezierTo(
+                            (neck.leftAnchorX + neck.rightAnchorX) / 2f,
+                            neck.centerY + neck.pinchHeight * 0.25f,
+                            neck.leftAnchorX,
+                            neck.centerY + neck.pinchHeight * 0.6f
+                        )
+                        close()
+                    }
+                    drawPath(path, Color.Black)
+                }
+            }
+        }
+
+        Row(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    rotationZ = rotation
+                    scaleX = pressScale
+                    scaleY = pressScale
+                    alpha = staleAlpha
+                }
+                .clip(shape)
+                .background(Color.Black)
+                .border(
+                    width = if (parsedKeylineColor != Color.Transparent) 1.dp else 0.dp,
+                    color = parsedKeylineColor,
+                    shape = shape
+                )
+                .pointerInput(locked, media, state) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { drag = 0f },
+                        onHorizontalDrag = { change, amount ->
+                            change.consume()
+                            drag += amount
+                        },
+                        onDragEnd = {
+                            if (kotlin.math.abs(drag) >= 36.dp.toPx()) {
+                                when {
+                                    state is IslandState.AlertPeek -> route(GestureAction.DISMISS_ALERT)
+                                    state is IslandState.Minimal -> route(GestureAction.CYCLE_ACTIVITY)
+                                    else -> route(if (drag < 0) currentOptions.swipeLeftAction else currentOptions.swipeRightAction)
+                                }
+                            }
+                            drag = 0f
+                        },
+                        onDragCancel = { drag = 0f }
+                    )
+                }
+                .combinedClickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    onClick = {
+                        val resolved = GesturePolicy.resolvePrimaryTap(
+                            mode = currentOptions.interactionMode,
+                            configuredTap = currentOptions.tapAction,
+                            hasActiveActivity = hasActivity,
+                            visibleMedia = visibleMedia,
+                            locked = locked
+                        )
+                        route(resolved)
+                    },
+                    onLongClick = {
+                        val resolved = GesturePolicy.resolvePrimaryHold(
+                            mode = currentOptions.interactionMode,
+                            configuredHold = currentOptions.holdAction,
+                            visibleMedia = visibleMedia,
+                            locked = locked
+                        )
+                        route(resolved)
+                    }
+                )
+                .semantics {
+                    contentDescription = a11yDescription
+                    if (state is IslandState.AlertPeek) {
+                        liveRegion = LiveRegionMode.Polite
+                    }
+                }
+                .padding(horizontal = if (secondary || widthLimitedSpec.isLimitedInWidth) 4.dp else 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            val slotSize = if (widthLimitedSpec.isLimitedInWidth) 24.dp else 26.dp
+
+            // Leading Slot (compactLeading or minimal droplet telemetry)
+            Box(Modifier.size(slotSize), contentAlignment = Alignment.Center) {
+                when {
+                    secondary && activity?.minimalContent is IslandSlotContent.Progress -> {
+                        val prog = activity.minimalContent as IslandSlotContent.Progress
+                        val frac = if (prog.max > 0) (prog.current.toFloat() / prog.max.toFloat()).coerceIn(0f, 1f) else 0.5f
+                        Canvas(Modifier.size(22.dp)) {
+                            drawCircle(Color.White.copy(alpha = 0.2f), style = Stroke(2.2.dp.toPx()))
+                            drawArc(
+                                color = tint,
+                                startAngle = -90f,
+                                sweepAngle = 360f * frac,
+                                useCenter = false,
+                                style = Stroke(2.2.dp.toPx(), cap = StrokeCap.Round)
+                            )
+                        }
+                    }
+                    image != null -> Image(
+                        image,
+                        "Album cover",
+                        Modifier.size(if (widthLimitedSpec.isLimitedInWidth) 20.dp else 24.dp).clip(RoundedCornerShape(5.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                    activity != null || state is IslandState.AlertPeek || locked -> Crossfade(
+                        symbol,
+                        animationSpec = tween(duration),
+                        label = "Activity icon"
+                    ) { glyph ->
+                        IslandGlyph(glyph, tint, Modifier.size(18.dp))
+                    }
+                    options.idleMiniStatusBar && state is IslandState.Closed -> {
+                        // Gap G4: this used to be
+                        // `remember { SimpleDateFormat("HH:mm").format(Date()) }`,
+                        // which captured the time once and then displayed that
+                        // same frozen minute for the lifetime of the overlay.
+                        // `rememberMiniBarClock` recomposes exactly when the
+                        // displayed minute changes — one wakeup per minute rather
+                        // than a per-second poll, which doc 1 forbids.
+                        val clockText = rememberMiniBarClock(
+                            active = true,
+                            is24Hour = miniStatusBar?.is24HourClock ?: true
+                        )
+                        Text(
+                            text = clockText,
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
+            // Leave the hardware aperture area clear. Never place controls over the hole.
+            if (!secondary) Spacer(Modifier.weight(1f))
+
+            // Trailing Slot (compactTrailing)
+            if (!secondary && widthLimitedSpec.showTrailing) {
+                when {
+                    media && !locked && playback.isPlaying -> {
+                        // Gap G7 — this fallback used to be a hard-coded
+                        // `listOf(0.45f, 0.85f, 0.6f, 0.9f)`. AudioWaveformEqualizer
+                        // treats any non-empty list as `realData` and renders it
+                        // verbatim, so four invented constants were being drawn as
+                        // though they were measured audio — the exact thing that
+                        // component's own KDoc forbids ("Only a genuine audio source
+                        // should ever provide these").
+                        //
+                        // WaveformSourcePolicy resolves the capability instead. We
+                        // attach no android.media.audiofx.Visualizer session here, so
+                        // this is never REAL_FFT and `mayBeDescribedAsRealSpectrum`
+                        // stays false: the bars are synthetic motion driven by the
+                        // playback position, not a spectrum claim.
+                        val suppliedAmps =
+                            (activity?.compactTrailing as? IslandSlotContent.AudioWaveform)
+                                ?.amplitudes.orEmpty()
+                        val waveformCapability = remember(
+                            options.reducedMotion,
+                            hasRecordAudioPermission
+                        ) {
+                            WaveformSourcePolicy.resolve(
+                                isVisible = true,
+                                isPlaying = playback.isPlaying,
+                                waveformEnabledInSettings = !options.reducedMotion,
+                                hasRecordAudioPermission = hasRecordAudioPermission,
+                                deviceSupportsVisualizer = false,
+                                visualizerSessionAttached = false,
+                                apiLevel = android.os.Build.VERSION.SDK_INT,
+                                reduceMotion = options.reducedMotion
+                            )
+                        }
+                        val waveAmps = when {
+                            // Genuine upstream amplitudes win, whatever the local
+                            // capability says — they came from a real source.
+                            suppliedAmps.isNotEmpty() -> suppliedAmps
+                            waveformCapability.source == WaveformSourcePolicy.WaveformSource.SYNTHETIC ->
+                                WaveformSourcePolicy.syntheticAmplitudes(
+                                    barCount = WaveformSourcePolicy.DEFAULT_BAR_COUNT,
+                                    phase = WaveformSourcePolicy.syntheticPhase(
+                                        positionMs = playback.positionMs,
+                                        speed = playback.playbackSpeed
+                                    ),
+                                    energy = 1f,
+                                    isPlaying = true
+                                )
+                            // FLAT / UNAVAILABLE: hand the empty list back so the
+                            // equalizer uses its documented honest "playing"
+                            // iconography rather than invented telemetry.
+                            else -> emptyList()
+                        }
+                        Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                            AudioWaveformEqualizer(
+                                amplitudes = waveAmps,
+                                color = tint,
+                                modifier = Modifier.height(16.dp)
+                            )
+                        }
+                    }
+                    media && !locked && playback.canPlayPause -> {
+                        Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                            IslandGlyph(
+                                if (playback.isPlaying) IslandSymbol.PAUSE else IslandSymbol.PLAY,
+                                Color.White,
+                                Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    !locked && activity?.kind == ActivityKind.FILE_DOWNLOAD -> {
+                        val frac = (activity.expandedData.progressFraction ?: 0.5f).coerceIn(0f, 1f)
+                        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+                            Canvas(Modifier.size(18.dp)) {
+                                drawCircle(Color.White.copy(alpha = 0.2f), style = Stroke(2.dp.toPx()))
+                                drawArc(
+                                    color = tint,
+                                    startAngle = -90f,
+                                    sweepAngle = 360f * frac,
+                                    useCenter = false,
+                                    style = Stroke(2.dp.toPx(), cap = StrokeCap.Round)
+                                )
+                            }
+                        }
+                    }
+                    !locked && (activity?.kind == ActivityKind.NAVIGATION || activity?.kind == ActivityKind.LIVE_JOURNEY) -> {
+                        val badge = activity.expandedData.progressLabel?.take(6) ?: "•"
+                        Text(
+                            text = badge,
+                            color = tint,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+                    activity != null || state is IslandState.AlertPeek -> {
+                        Text(
+                            text = if (activity?.isStale == true) "…" else "•",
+                            color = tint,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    options.idleMiniStatusBar && state is IslandState.Closed -> {
+                        // Gap G4: a constant green glyph told the user nothing.
+                        // Tint and fill now come from the observed battery state,
+                        // and the cellular/Wi-Fi bars doc 2 asks for are drawn
+                        // alongside it.
+                        val snapshot = miniStatusBar
+                        val battery = snapshot?.batteryPercent?.let { percent ->
+                            MiniStatusBarPolicy.batteryPresentation(
+                                percent = percent,
+                                isCharging = snapshot.isCharging,
+                                isPowerSaveMode = snapshot.isPowerSaveMode,
+                                showPercentText = snapshot.showBatteryPercent
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            if (snapshot?.hasSignal == true) {
+                                MiniSignalBars(
+                                    level = snapshot.signalLevel,
+                                    tint = Color.White.copy(alpha = 0.85f)
+                                )
+                            }
+                            if (battery != null) {
+                                battery.text?.let { text ->
+                                    Text(
+                                        text = text,
+                                        color = Color(battery.tintArgb),
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                            Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                                val glyphTint = if (battery != null) {
+                                    Color(battery.tintArgb)
+                                } else {
+                                    Color.White.copy(alpha = 0.85f)
+                                }
+                                IslandGlyph(IslandSymbol.BATTERY, glyphTint, Modifier.size(14.dp))
+                                // Fill the glyph proportionally so level is legible
+                                // without a text label.
+                                if (battery != null) {
+                                    Box(
+                                        Modifier
+                                            .align(Alignment.BottomStart)
+                                            .fillMaxWidth(battery.fillFraction.coerceIn(0f, 1f))
+                                            .height(3.dp)
+                                            .background(glyphTint.copy(alpha = 0.9f))
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    else -> Spacer(Modifier.size(26.dp))
+                }
+            }
+        }
+
+        // Tri-state iOS-accurate Privacy Indicator Dot
+        val dotColor = when {
+            microphoneActive && cameraActive -> Color(0xFF0A84FF) // iOS Blue (Both)
+            cameraActive -> Color(0xFF30D158)                     // iOS Green (Camera)
+            microphoneActive -> Color(0xFFFF9F0A)                 // iOS Orange (Mic)
+            else -> null
+        }
+        if (!secondary && dotColor != null) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 4.dp)
+                    .size(6.dp)
+                    .background(dotColor, CircleShape)
+                    .semantics { contentDescription = "Privacy indicator active" }
+            )
+        }
+    }
+}
+
+/**
+ * Gap **G4** — the cellular/Wi-Fi signal bars doc 2 requires on the miniature
+ * status bar.
+ *
+ * Bar count comes from [MiniStatusBarPolicy.SignalLevel], which maps the observed
+ * RSSI or RSRP onto Android's own level thresholds, so the pill agrees with the
+ * system status bar rather than inventing a strength. Bars are drawn as an
+ * ascending staircase and inactive bars are kept as dim placeholders: removing
+ * them entirely would make the glyph shift horizontally as signal changed, which
+ * is exactly the geometry instability doc 1 warns about.
+ */
+@Composable
+private fun MiniSignalBars(
+    level: MiniStatusBarPolicy.SignalLevel,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    val active = level.bars
+    val total = MiniStatusBarPolicy.SIGNAL_LEVELS
+    Row(
+        modifier = modifier
+            .semantics { contentDescription = "Signal strength $active of $total" },
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(1.dp)
+    ) {
+        for (index in 1..total) {
+            // Ascending heights on the 2 dp optical grid; the shortest bar stays
+            // visible so the staircase reads at 9 sp scale.
+            val heightDp = 2.dp + (index * 1.5f).dp
+            Box(
+                Modifier
+                    .width(1.5.dp)
+                    .height(heightDp)
+                    .background(
+                        if (index <= active) tint else tint.copy(alpha = 0.28f),
+                        RoundedCornerShape(0.5.dp)
+                    )
+            )
+        }
+    }
+}
+
+private fun parseHexColor(hex: String?, fallback: Color): Color {
+    if (hex.isNullOrBlank()) return fallback
+    return runCatching {
+        Color(android.graphics.Color.parseColor(hex))
+    }.getOrDefault(fallback)
+}
