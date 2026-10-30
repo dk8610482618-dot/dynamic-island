@@ -717,6 +717,36 @@ fun DynamicIslandView(
                                 return@detectDragGestures
                             }
 
+                            // --------------------------------------------------
+                            // SWIPE AWAY A TRANSIENT ALERT
+                            //
+                            // Doc 1's gesture table: "Swipe away transient alert
+                            // -> Suppress that instance, not the underlying
+                            // ongoing activity."
+                            //
+                            // This must be checked *before* the media case.
+                            // `isMediaSwipe` deliberately treats AlertPeek as a
+                            // passive pill that follows the media session, so
+                            // without this branch a horizontal swipe on a "driver
+                            // arriving" peek would skip the current track and
+                            // leave the alert on screen — the opposite of what
+                            // the user asked for.
+                            //
+                            // Dismissal routes to the arbiter, which suppresses
+                            // only this alert instance and keeps the journey,
+                            // timer or media session underneath it alive.
+                            // --------------------------------------------------
+                            if (mediaState is IslandState.AlertPeek) {
+                                if (abs(dx) >= MEDIA_SWIPE_DP || abs(dy) >= MEDIA_SWIPE_DP) {
+                                    latestOnDismissAlert()
+                                }
+                                accumX = 0f
+                                accumY = 0f
+                                idle = false
+                                motion.clearDrag()
+                                return@detectDragGestures
+                            }
+
                             if (isMediaOnScreen && abs(dx) >= MEDIA_SWIPE_DP) {
                                 // Accommodate right-to-left layouts: the arrow
                                 // that points "next" is mirrored, so the swipe

@@ -44,10 +44,9 @@ import com.dynamicisland.core.privacy.LockStatePrivacyPolicy
 import com.dynamicisland.engine.core.model.*
 import com.dynamicisland.engine.settings.BehaviorOptions
 import com.dynamicisland.engine.ui.components.AudioWaveformEqualizer
+import com.dynamicisland.core.system.MiniStatusBarPolicy
 import com.dynamicisland.engine.ui.icons.IslandGlyph
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.dynamicisland.engine.ui.util.rememberMiniBarClock
 
 /**
  * Flagship Compact & Minimal Dynamic Island Capsule.
@@ -76,7 +75,12 @@ fun FixedIslandCapsule(
     cornerRadius: Dp? = null,
     microphoneActive: Boolean = false,
     cameraActive: Boolean = false,
-    isLandscape: Boolean = false
+    isLandscape: Boolean = false,
+    /**
+     * Gap G4 — real battery and signal data for the immersive mini status bar.
+     * Null keeps the previous glyph-only behaviour for the preview fixtures.
+     */
+    miniStatusBar: MiniStatusBarSnapshot? = null
 ) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val activity = when (state) {
@@ -315,7 +319,17 @@ fun FixedIslandCapsule(
                         IslandGlyph(glyph, tint, Modifier.size(18.dp))
                     }
                     options.idleMiniStatusBar && state is IslandState.Closed -> {
-                        val clockText = remember { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()) }
+                        // Gap G4: this used to be
+                        // `remember { SimpleDateFormat("HH:mm").format(Date()) }`,
+                        // which captured the time once and then displayed that
+                        // same frozen minute for the lifetime of the overlay.
+                        // `rememberMiniBarClock` recomposes exactly when the
+                        // displayed minute changes — one wakeup per minute rather
+                        // than a per-second poll, which doc 1 forbids.
+                        val clockText = rememberMiniBarClock(
+                            active = true,
+                            is24Hour = miniStatusBar?.is24HourClock ?: true
+                        )
                         Text(
                             text = clockText,
                             color = Color.White.copy(alpha = 0.85f),
@@ -387,8 +401,59 @@ fun FixedIslandCapsule(
                         )
                     }
                     options.idleMiniStatusBar && state is IslandState.Closed -> {
-                        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
-                            IslandGlyph(IslandSymbol.BATTERY, Color(0xFF30D158), Modifier.size(15.dp))
+                        // Gap G4: a constant green glyph told the user nothing.
+                        // Tint and fill now come from the observed battery state,
+                        // and the cellular/Wi-Fi bars doc 2 asks for are drawn
+                        // alongside it.
+                        val snapshot = miniStatusBar
+                        val battery = snapshot?.batteryPercent?.let { percent ->
+                            MiniStatusBarPolicy.batteryPresentation(
+                                percent = percent,
+                                isCharging = snapshot.isCharging,
+                                isPowerSaveMode = snapshot.isPowerSaveMode,
+                                showPercentText = snapshot.showBatteryPercent
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            if (snapshot?.hasSignal == true) {
+                                MiniSignalBars(
+                                    level = snapshot.signalLevel,
+                                    tint = Color.White.copy(alpha = 0.85f)
+                                )
+                            }
+                            if (battery != null) {
+                                battery.text?.let { text ->
+                                    Text(
+                                        text = text,
+                                        color = Color(battery.tintArgb),
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                            Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                                val glyphTint = if (battery != null) {
+                                    Color(battery.tintArgb)
+                                } else {
+                                    Color.White.copy(alpha = 0.85f)
+                                }
+                                IslandGlyph(IslandSymbol.BATTERY, glyphTint, Modifier.size(14.dp))
+                                // Fill the glyph proportionally so level is legible
+                                // without a text label.
+                                if (battery != null) {
+                                    Box(
+                                        Modifier
+                                            .align(Alignment.BottomStart)
+                                            .fillMaxWidth(battery.fillFraction.coerceIn(0f, 1f))
+                                            .height(3.dp)
+                                            .background(glyphTint.copy(alpha = 0.9f))
+                                    )
+                                }
+                            }
                         }
                     }
                     else -> Spacer(Modifier.size(26.dp))
@@ -411,6 +476,48 @@ fun FixedIslandCapsule(
                     .size(6.dp)
                     .background(dotColor, CircleShape)
                     .semantics { contentDescription = "Privacy indicator active" }
+            )
+        }
+    }
+}
+
+/**
+ * Gap **G4** — the cellular/Wi-Fi signal bars doc 2 requires on the miniature
+ * status bar.
+ *
+ * Bar count comes from [MiniStatusBarPolicy.SignalLevel], which maps the observed
+ * RSSI or RSRP onto Android's own level thresholds, so the pill agrees with the
+ * system status bar rather than inventing a strength. Bars are drawn as an
+ * ascending staircase and inactive bars are kept as dim placeholders: removing
+ * them entirely would make the glyph shift horizontally as signal changed, which
+ * is exactly the geometry instability doc 1 warns about.
+ */
+@Composable
+private fun MiniSignalBars(
+    level: MiniStatusBarPolicy.SignalLevel,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    val active = level.bars
+    val total = MiniStatusBarPolicy.SIGNAL_LEVELS
+    Row(
+        modifier = modifier
+            .semantics { contentDescription = "Signal strength $active of $total" },
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(1.dp)
+    ) {
+        for (index in 1..total) {
+            // Ascending heights on the 2 dp optical grid; the shortest bar stays
+            // visible so the staircase reads at 9 sp scale.
+            val heightDp = 2.dp + (index * 1.5f).dp
+            Box(
+                Modifier
+                    .width(1.5.dp)
+                    .height(heightDp)
+                    .background(
+                        if (index <= active) tint else tint.copy(alpha = 0.28f),
+                        RoundedCornerShape(0.5.dp)
+                    )
             )
         }
     }

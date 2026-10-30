@@ -55,6 +55,26 @@ internal fun ExperienceSettingsPanel(options: BehaviorOptions, onOptions: (Behav
             onOptions(options.copy(idleMiniStatusBar = it))
         }
 
+        // Gap G3 — `hideInFullscreenApps` was a dead setting: persisted to
+        // SharedPreferences and never read by any renderer or the service. It is
+        // wired now (see AppSuppressionPolicy), so it gets a visible control and
+        // an honest description of what it can and cannot do.
+        Text("App suppression", style = MaterialTheme.typography.titleLarge, color = Color.White)
+        SettingToggle("Hide island in full-screen apps", options.hideInFullscreenApps) {
+            onOptions(options.copy(hideInFullscreenApps = it))
+        }
+        Text(
+            "Hides the pill while an app hides the system bars (games, video). " +
+                "Incoming calls still break through.",
+            color = Color(0xFFB8C1BA)
+        )
+        Text(
+            "Detecting which app is in front needs Usage access, under " +
+                "Settings → Usage access. Without it only the full-screen rule " +
+                "above applies, and per-package rules are skipped rather than guessed.",
+            color = Color(0xFFB8C1BA)
+        )
+
         Text("Activity priority", style = MaterialTheme.typography.titleLarge, color = Color.White)
         ChoiceRow("Priority", ActivityPriority.values().toList(), options.priority) {
             onOptions(options.copy(priority = it))

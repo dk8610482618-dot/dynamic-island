@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.dynamicisland.core.activity.ActivityLifecyclePolicy
 import com.dynamicisland.core.geometry.ExpandedRegionLayoutSolver
+import com.dynamicisland.core.system.MiniStatusBarPolicy
 
 /**
  * Priority rank replicating iOS Jindo & ActivityKit system rules.
@@ -265,6 +266,11 @@ data class IslandActivity(
 
 /**
  * Transient Alert data for temporary popouts (charging connected, silent switch, AirPod battery, alerting Live Update).
+ *
+ * [sourceActivityId] and [suppressionKey] exist to satisfy the gesture rule that
+ * swiping a transient alert away must **suppress that instance and not the
+ * ongoing activity underneath it**. See
+ * `com.dynamicisland.core.presentation.TransientAlertPolicy`.
  */
 data class TransientAlert(
     val id: String,
@@ -277,7 +283,25 @@ data class TransientAlert(
     val rank: PriorityRank = PriorityRank.TRANSIENT_SYSTEM_ALERT,
     val deepLinkIntent: PendingIntent? = null,
     val sound: Boolean = false,
-    val haptic: Boolean = true
+    val haptic: Boolean = true,
+    /**
+     * The ongoing activity this alert belongs to, when it is an *alerting update*
+     * of a Live Activity rather than a stand-alone system event. Set for a
+     * navigation turn or an arrival; null for "charger connected".
+     */
+    val sourceActivityId: String? = null,
+    /**
+     * Stable key for swipe-away suppression. Alerts of the same kind from the
+     * same source share a key, so dismissing one "turn" peek silences further
+     * turn peeks for the cooldown window without ending the journey. Defaults to
+     * [id], which suppresses only that exact instance.
+     */
+    val suppressionKey: String = id,
+    /**
+     * Fingerprint of the alert's user-visible content. An update carrying an
+     * identical signature is a repeat and must not re-expand the island.
+     */
+    val payloadSignature: String = "$id|$title|$message"
 )
 
 /**
@@ -340,3 +364,25 @@ sealed interface IslandState {
         val newest: IslandNotification? get() = notifications.firstOrNull()
     }
 }
+
+/**
+ * Gap **G4** — real data for the immersive mini status bar.
+ *
+ * The previous renderer drew a constant green battery glyph and a clock captured
+ * once per composition. This snapshot carries the observed values so the pill can
+ * show a truthful miniature status bar, and every field is nullable or defaulted
+ * so an unobserved signal renders as "unknown" rather than as a fabricated one.
+ */
+data class MiniStatusBarSnapshot(
+    /** Null when battery state has not been observed yet; renders no percentage. */
+    val batteryPercent: Int? = null,
+    val isCharging: Boolean = false,
+    val isPowerSaveMode: Boolean = false,
+    val signalLevel: MiniStatusBarPolicy.SignalLevel = MiniStatusBarPolicy.SignalLevel.NONE,
+    /** True when [signalLevel] describes Wi-Fi rather than cellular. */
+    val isWifi: Boolean = false,
+    /** False when there is no service at all, so no bars are drawn. */
+    val hasSignal: Boolean = false,
+    val is24HourClock: Boolean = true,
+    val showBatteryPercent: Boolean = false
+)

@@ -16,6 +16,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import android.content.Context
+import android.os.PowerManager
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.paneTitle
@@ -23,6 +27,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.dynamicisland.core.geometry.AppearancePreset
+import com.dynamicisland.core.material.LiquidGlassPolicy
 import com.dynamicisland.core.motion.ScrubCollapseController
 import com.dynamicisland.engine.core.bus.IslandUserCommand
 import com.dynamicisland.engine.core.bus.SystemIngestionEvent
@@ -63,6 +69,12 @@ fun IslandExpandedPanel(
     val activity = (state as? IslandState.Expanded)?.activity
     val close by rememberUpdatedState(onClose)
     val density = LocalDensity.current
+    // Low-power drops the blur: it is the case where the system has already asked
+    // every app to composite more cheaply.
+    val context = LocalContext.current
+    val powerSaveMode = remember(context) {
+        (context.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isPowerSaveMode == true
+    }
     val contentHeight = (196 + (density.fontScale.coerceIn(1f, 2f) - 1) * 90).dp
 
     var cumulativeDragYPx by remember { mutableFloatStateOf(0f) }
@@ -99,6 +111,57 @@ fun IslandExpandedPanel(
 
     val shape = RoundedCornerShape(scrubState.cornerRadiusDp.dp)
 
+    // Gap G5 — Liquid Glass as a real material with anti-stacking.
+    //
+    // `AppearancePreset.LIQUID_GLASS` previously did nothing here beyond an alpha
+    // swap on the compact capsule. Doc 2 requires adaptive translucency to lift
+    // the controls *and* explicitly forbids stacking glass-on-glass across parent
+    // and child views, "which creates visual noise and wastes GPU resources".
+    //
+    // `LiquidGlassPolicy.resolveSurfaces` enforces that: the card blurs, and the
+    // controls inside it are demoted to a solid tint so only one layer in the
+    // chain pays for an offscreen buffer. Reduce-transparency and low-power drop
+    // the blur entirely rather than degrading it.
+    val glassSurfaces = remember(
+        options.appearance,
+        options.reducedMotion,
+        powerSaveMode
+    ) {
+        LiquidGlassPolicy.resolveSurfaces(
+            chain = listOf(LiquidGlassPolicy.GlassSurface.CARD, LiquidGlassPolicy.GlassSurface.CONTROL),
+            appearanceIsLiquidGlass = options.appearance == AppearancePreset.LIQUID_GLASS,
+            reduceTransparency = options.reducedMotion,
+            lowPowerMode = powerSaveMode
+        )
+    }
+    val cardSurface = glassSurfaces.first()
+    val controlSurface = glassSurfaces.last()
+
+    // The island masks the physical cutout, so the card must stay opaque black
+    // unless glass was actually resolved. A translucent card over the sensor
+    // housing would reveal the camera aperture instead of hiding it.
+    val cardBackground = when (cardSurface.treatment) {
+        LiquidGlassPolicy.SurfaceTreatment.GLASS ->
+            Color.White.copy(alpha = cardSurface.tintAlpha)
+        LiquidGlassPolicy.SurfaceTreatment.SOLID_TINT ->
+            Color(0xFF1C1C1E)
+        LiquidGlassPolicy.SurfaceTreatment.NONE -> Color.Black
+    }
+
+    // Doc 2 requires 4.5:1 for body text and 3:1 for large text on these
+    // surfaces. The tint is album-derived, so it can land anywhere; enforce the
+    // ratio rather than hoping the artwork cooperates.
+    val headerTextColor = remember(cardBackground, density.fontScale) {
+        val backgroundArgb = cardBackground.toArgb()
+        val foregroundArgb = LiquidGlassPolicy.ensureContrast(
+            foregroundArgb = Color.White.toArgb(),
+            backgroundArgb = backgroundArgb,
+            textSizeSp = 15f * density.fontScale,
+            isBoldOrHeavier = true
+        )
+        Color(foregroundArgb)
+    }
+
     MaterialTheme(colorScheme = darkColorScheme(primary = Color.White, surface = Color.Black)) {
         Column(
             Modifier
@@ -109,7 +172,7 @@ fun IslandExpandedPanel(
                     alpha = scrubState.expandedContentAlpha.coerceAtLeast(0.25f)
                 }
                 .clip(shape)
-                .background(Color.Black)
+                .background(cardBackground)
                 .border(1.dp, keylineColor, shape)
                 .semantics {
                     contentDescription = "Expanded island"
@@ -153,7 +216,20 @@ fun IslandExpandedPanel(
                 Text(
                     text = if (activity?.isStale == true) "$headerLabel · Stale" else headerLabel,
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (activity?.isStale == true) Color(0xFFFF9F0A) else Color(0xFFB7BABD),
+                    // Gap G5: the stale amber is contrast-checked against the
+                    // resolved surface too, so a glass tint cannot make it fail.
+                    color = if (activity?.isStale == true) {
+                        Color(
+                            LiquidGlassPolicy.ensureContrast(
+                                foregroundArgb = Color(0xFFFF9F0A).toArgb(),
+                                backgroundArgb = cardBackground.toArgb(),
+                                textSizeSp = 15f * density.fontScale,
+                                isBoldOrHeavier = true
+                            )
+                        )
+                    } else {
+                        headerTextColor
+                    },
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
@@ -163,6 +239,17 @@ fun IslandExpandedPanel(
                     Modifier
                         .size(48.dp)
                         .clip(RoundedCornerShape(24.dp))
+                        // Gap G5: the control sits inside the card, so the policy
+                        // hands it SOLID_TINT rather than a second blur. When the
+                        // card is plain black the treatment is NONE and nothing is
+                        // drawn, which keeps the existing look.
+                        .then(
+                            if (controlSurface.treatment == LiquidGlassPolicy.SurfaceTreatment.SOLID_TINT) {
+                                Modifier.background(Color.White.copy(alpha = controlSurface.tintAlpha))
+                            } else {
+                                Modifier
+                            }
+                        )
                         .clickable(onClick = onClose)
                         .semantics { contentDescription = "Collapse island" },
                     contentAlignment = Alignment.Center

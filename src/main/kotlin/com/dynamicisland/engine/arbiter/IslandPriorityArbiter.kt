@@ -19,6 +19,7 @@ import com.dynamicisland.engine.core.model.PriorityRank
 import com.dynamicisland.engine.core.model.TransientAlert
 import com.dynamicisland.core.activity.ActivityLifecyclePolicy
 import com.dynamicisland.core.geometry.InteractionMode
+import com.dynamicisland.core.presentation.TransientAlertPolicy
 import com.dynamicisland.engine.ingestion.media.AlbumArtResolver
 import com.dynamicisland.engine.ingestion.notifications.LiveUpdateProgressParser
 import com.dynamicisland.engine.util.PendingIntentCompat
@@ -78,7 +79,52 @@ class IslandPriorityArbiter(
     // Currently expanded activity ID, if any
     private var expansionPriorityAtSelection: Int? = null
     private var expandedActivityId: String? = null
-        set(value) { field = value; expansionPriorityAtSelection = null }
+        set(value) {
+            field = value
+            expansionPriorityAtSelection = null
+            // Any assignment that did not come through `expandByUser` is not
+            // user-held: it is an alerting-update auto-expansion, a preemption by
+            // a higher-priority activity, or a collapse. Resetting here means the
+            // dozen internal call sites cannot accidentally leave the flag stuck.
+            if (!userExpansionInProgress) expansionIsUserHeld = false
+        }
+
+    /**
+     * Guards the setter so [expandByUser] can claim the expansion as the user's.
+     */
+    private var userExpansionInProgress: Boolean = false
+
+    /**
+     * Opens the expanded card as an explicit user action (long press, or tap in
+     * Android Classic mode). An alerting-update auto-expand will not collapse a
+     * card opened this way, and will not interrupt the gesture that opened it.
+     *
+     * @param priorityAtSelection priority of the activity that was primary when
+     *   the user expanded a *secondary* slot, so a newly arrived higher-priority
+     *   activity can still preempt the card.
+     */
+    private fun expandByUser(activityId: String, priorityAtSelection: Int? = null) {
+        userExpansionInProgress = true
+        try {
+            expandedActivityId = activityId
+            // After the assignment: the setter clears this field.
+            expansionPriorityAtSelection = priorityAtSelection
+            expansionIsUserHeld = true
+        } finally {
+            userExpansionInProgress = false
+        }
+    }
+
+    /** Collapses the card because the user asked: swipe up, outside tap, chevron. */
+    private fun collapseByUser() {
+        userExpansionInProgress = true
+        try {
+            expandedActivityId = null
+            expansionIsUserHeld = false
+        } finally {
+            userExpansionInProgress = false
+        }
+    }
 
     // Active transient alert peek job and alert instance
     private var activeAlertPeek: TransientAlert? = null
@@ -92,6 +138,36 @@ class IslandPriorityArbiter(
      */
     private var activeAlertPeekStartedAt: Long = 0L
     private var alertPeekJob: Job? = null
+
+    /**
+     * Gap G1 — swipe-away suppression ledger (suppression key -> expiry millis).
+     *
+     * Dismissing a transient alert silences *that alert*, never the ongoing
+     * activity underneath it. Managed by `TransientAlertPolicy` so the cooldown,
+     * the size bound and the instance/activity separation are all pure and
+     * unit-tested rather than implicit in this class.
+     */
+    private var alertSuppressionLedger: Map<String, Long> = emptyMap()
+
+    /**
+     * Gap G2 — signature of the last alerting payload, so an update that carries
+     * no new information does not re-expand the island. Doc 1 requires updating
+     * "only when new information exists".
+     */
+    private var lastAlertPayloadSignature: String? = null
+
+    /**
+     * True while the expanded card is open because the *user* long-pressed it.
+     *
+     * Distinguishing a user-held expansion from an automatic one matters twice:
+     * an alerting update must not yank the island out from under an active
+     * long-press, and the auto-expand timer must not collapse a card the user is
+     * still reading.
+     */
+    private var expansionIsUserHeld: Boolean = false
+
+    /** Job that collapses an automatic (alerting-update) expansion. */
+    private var autoExpandJob: Job? = null
 
     /**
      * True while the tracked media session is actually playing.
@@ -816,12 +892,76 @@ class IslandPriorityArbiter(
             return
         }
 
+        // --- Gap G2: alerting-update arbitration ---------------------------
+        // An update that carries an alert configuration does not fire a banner;
+        // it expands the activity for ~2s and then settles back into its compact
+        // or minimal footprint. `TransientAlertPolicy` decides whether this
+        // update is allowed to interrupt at all, and for how long.
+        val signature = alert.payloadSignature
+        val decision = TransientAlertPolicy.resolveAutoExpand(
+            configuration = TransientAlertPolicy.AlertConfiguration(
+                alertId = alert.id,
+                importance = importanceForRank(alert.rank),
+                autoExpandMs = alert.durationMillis,
+                isRepeatOfPreviousPayload = signature == lastAlertPayloadSignature,
+                suppressionKey = alert.suppressionKey
+            ),
+            nowMillis = clockMillis(),
+            suppressionLedger = alertSuppressionLedger,
+            isLocked = isKeyguardLocked,
+            quietHoursActive = isQuietHoursActive(),
+            userIsHoldingExpanded = expansionIsUserHeld,
+            reduceMotion = behavior.value.reducedMotion
+        )
+        lastAlertPayloadSignature = signature
+
+        if (!decision.shouldAutoExpand) {
+            // Suppressed. Note what this does NOT do: the underlying activity is
+            // untouched, and an already-open user expansion is left alone.
+            if (decision.reason == TransientAlertPolicy.SuppressReason.USER_ALREADY_EXPANDED) {
+                // Merge the new data into the card the user is holding open.
+                alert.sourceActivityId?.let { id ->
+                    activeActivities[id]?.let { existing ->
+                        alert.expandedData?.let { fresh ->
+                            activeActivities[id] = existing.copy(expandedData = fresh)
+                        }
+                    }
+                }
+                recomputeIslandState()
+            }
+            return
+        }
+
+        val resolvedDuration = decision.expandDurationMs
+
         alertPeekJob?.cancel()
-        activeAlertPeek = alert
+        activeAlertPeek = alert.copy(durationMillis = resolvedDuration)
         activeAlertPeekStartedAt = clockMillis()
 
+        // An alerting update of a *Live Activity* transiently expands that
+        // activity rather than showing a separate peek card. A stand-alone system
+        // event (charger connected) has no activity to expand, so it keeps the
+        // peek treatment.
+        val expandableSource = alert.sourceActivityId?.takeIf { activeActivities.containsKey(it) }
+        if (expandableSource != null && !expansionIsUserHeld) {
+            autoExpandJob?.cancel()
+            expandedActivityId = expandableSource
+            expansionPriorityAtSelection = priorityOrder(activeActivities.getValue(expandableSource))
+            autoExpandJob = scope.launch {
+                delay(resolvedDuration)
+                mutex.withLock {
+                    // Only collapse an expansion we opened. If the user took over
+                    // by long-pressing, the card is theirs now.
+                    if (!expansionIsUserHeld && expandedActivityId == expandableSource) {
+                        expandedActivityId = null
+                        recomputeIslandState()
+                    }
+                }
+            }
+        }
+
         alertPeekJob = scope.launch {
-            delay(alert.durationMillis)
+            delay(resolvedDuration)
             mutex.withLock {
                 if (activeAlertPeek?.id == alert.id) {
                     activeAlertPeek = null
@@ -831,6 +971,44 @@ class IslandPriorityArbiter(
             }
         }
     }
+
+    /**
+     * Maps the engine's [PriorityRank] onto the alert importance ladder that
+     * `TransientAlertPolicy` arbitrates on.
+     *
+     * Only ranks that represent something the user is waiting for may interrupt.
+     * A low-priority notification is a routine content refresh and must never
+     * hijack the island — which is the exact failure mode doc 2 attributes to
+     * naive overlay clones.
+     */
+    private fun importanceForRank(rank: PriorityRank): TransientAlertPolicy.AlertImportance = when (rank) {
+        PriorityRank.EMERGENCY_OR_CALL -> TransientAlertPolicy.AlertImportance.CRITICAL
+        PriorityRank.LIVE_TIMER_STOPWATCH,
+        PriorityRank.NAVIGATION_TURN_BY_TURN -> TransientAlertPolicy.AlertImportance.TIME_SENSITIVE
+
+        PriorityRank.LIVE_JOURNEY_DELIVERY,
+        PriorityRank.TRANSIENT_SYSTEM_ALERT -> TransientAlertPolicy.AlertImportance.TIME_SENSITIVE
+
+        PriorityRank.MEDIA_PLAYBACK,
+        PriorityRank.FILE_DOWNLOAD_TRANSFER -> TransientAlertPolicy.AlertImportance.DEFAULT
+
+        PriorityRank.LOW_PRIORITY_NOTIFICATION -> TransientAlertPolicy.AlertImportance.PASSIVE
+    }
+
+    /**
+     * Quiet hours from settings, evaluated against the wall clock. Kept as a
+     * helper so the alert path and any future path read the same rule.
+     */
+    private fun isQuietHoursActive(): Boolean {
+        val options = behavior.value
+        if (!options.quietHours) return false
+        val now = java.util.Calendar.getInstance()
+        val minutes = now.get(java.util.Calendar.HOUR_OF_DAY) * 60 + now.get(java.util.Calendar.MINUTE)
+        val start = options.quietStart
+        val end = options.quietEnd
+        return if (start <= end) minutes in start until end else minutes >= start || minutes < end
+    }
+
 
     // --- Notification Inbox ---
 
@@ -974,14 +1152,14 @@ class IslandPriorityArbiter(
                             if (appleParity) {
                                 intentToTrigger = current.activity.deepLinkIntent
                             } else {
-                                expandedActivityId = current.activity.id
+                                expandByUser(current.activity.id)
                             }
                         }
                         is IslandState.Minimal -> {
                             if (appleParity) {
                                 intentToTrigger = current.primary.deepLinkIntent
                             } else {
-                                expandedActivityId = current.primary.id
+                                expandByUser(current.primary.id)
                             }
                         }
                         is IslandState.AlertPeek -> {
@@ -991,14 +1169,14 @@ class IslandPriorityArbiter(
                             if (notificationInbox.any { it.key == current.alert.id }) {
                                 openInbox()
                             } else when (val underlying = current.underlyingState) {
-                                is IslandState.Compact -> expandedActivityId = underlying.activity.id
-                                is IslandState.Minimal -> expandedActivityId = underlying.primary.id
-                                is IslandState.Expanded -> expandedActivityId = underlying.activity.id
+                                is IslandState.Compact -> expandByUser(underlying.activity.id)
+                                is IslandState.Minimal -> expandByUser(underlying.primary.id)
+                                is IslandState.Expanded -> expandByUser(underlying.activity.id)
                                 else -> Unit
                             }
                         }
                         is IslandState.Expanded -> {
-                            expandedActivityId = null
+                            collapseByUser()
                         }
                         else -> Unit
                     }
@@ -1010,8 +1188,10 @@ class IslandPriorityArbiter(
                         if (appleParity && current.secondary.deepLinkIntent != null) {
                             intentToTrigger = current.secondary.deepLinkIntent
                         } else {
-                            expandedActivityId = current.secondary.id
-                            expansionPriorityAtSelection = priorityOrder(current.primary)
+                            // No deep link to open, so a tap falls back to
+                            // expanding. Still a user action, so the auto-expand
+                            // timer must not collapse it.
+                            expandByUser(current.secondary.id, priorityOrder(current.primary))
                         }
                     }
                 }
@@ -1023,8 +1203,7 @@ class IslandPriorityArbiter(
                         if (appleParity && tertiary.deepLinkIntent != null) {
                             intentToTrigger = tertiary.deepLinkIntent
                         } else {
-                            expandedActivityId = tertiary.id
-                            expansionPriorityAtSelection = priorityOrder(current.primary)
+                            expandByUser(tertiary.id, priorityOrder(current.primary))
                         }
                     }
                 }
@@ -1039,7 +1218,7 @@ class IslandPriorityArbiter(
                     }
                     if (target != null) {
                         if (appleParity && current !is IslandState.Expanded) {
-                            expandedActivityId = target.id
+                            expandByUser(target.id)
                         } else {
                             intentToTrigger = target.deepLinkIntent
                         }
@@ -1050,8 +1229,7 @@ class IslandPriorityArbiter(
                     val appleParity = behavior.value.interactionMode == InteractionMode.APPLE_PARITY
                     if (current is IslandState.Minimal) {
                         if (appleParity && current.primary.rank != PriorityRank.EMERGENCY_OR_CALL) {
-                            expandedActivityId = current.secondary.id
-                            expansionPriorityAtSelection = priorityOrder(current.primary)
+                            expandByUser(current.secondary.id, priorityOrder(current.primary))
                         } else {
                             intentToTrigger = current.secondary.deepLinkIntent
                         }
@@ -1063,8 +1241,7 @@ class IslandPriorityArbiter(
                     val tertiary = (current as? IslandState.Minimal)?.tertiary
                     if (current is IslandState.Minimal && tertiary != null) {
                         if (appleParity && current.primary.rank != PriorityRank.EMERGENCY_OR_CALL) {
-                            expandedActivityId = tertiary.id
-                            expansionPriorityAtSelection = priorityOrder(current.primary)
+                            expandByUser(tertiary.id, priorityOrder(current.primary))
                         } else {
                             intentToTrigger = tertiary.deepLinkIntent
                         }
@@ -1076,12 +1253,44 @@ class IslandPriorityArbiter(
                     }
                 }
                 is IslandUserCommand.CollapseExpanded -> {
-                    expandedActivityId = null
+                    collapseByUser()
                 }
                 is IslandUserCommand.DismissAlertPeek -> {
+                    // Gap G1 — swiping a transient alert away suppresses *that
+                    // instance*, never the ongoing activity underneath it. The
+                    // separation is enforced by the pure policy so it cannot
+                    // regress into "dismiss the alert, kill the journey".
+                    val dismissed = activeAlertPeek
                     alertPeekJob?.cancel()
+                    autoExpandJob?.cancel()
                     activeAlertPeek = null
                     activeAlertPeekStartedAt = 0L
+
+                    if (dismissed != null) {
+                        val outcome = TransientAlertPolicy.resolveSwipeDismissal(
+                            suppressionLedger = alertSuppressionLedger,
+                            alert = TransientAlertPolicy.AlertConfiguration(
+                                alertId = dismissed.id,
+                                suppressionKey = dismissed.suppressionKey
+                            ),
+                            // Everything still ongoing is retained, including the
+                            // activity that produced the alert.
+                            underlyingActivityIds = activeActivities.keys.toList(),
+                            alertProducingActivityId = dismissed.sourceActivityId,
+                            nowMillis = clockMillis()
+                        )
+                        alertSuppressionLedger = outcome.suppressionLedger
+
+                        // If the alert had auto-expanded its source activity, the
+                        // swipe collapses that expansion and settles back onto the
+                        // retained activities rather than going idle.
+                        if (outcome.nextPresentation ==
+                            TransientAlertPolicy.PresentationAfterDismissal.RESTORE_UNDERLYING &&
+                            !expansionIsUserHeld
+                        ) {
+                            expandedActivityId = null
+                        }
+                    }
                 }
                 is IslandUserCommand.DismissActivity -> {
                     removeActivity(command.activityId)

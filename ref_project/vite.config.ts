@@ -16,4 +16,19 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  server: {
+    // Bind every interface so the sandbox's proxied preview host can reach the
+    // dev server, and accept any Host header rather than only localhost — Vite
+    // rejects unknown hosts by default, which would break the preview iframe.
+    host: "0.0.0.0",
+    port: 5173,
+    strictPort: true,
+    allowedHosts: true,
+  },
+  preview: {
+    host: "0.0.0.0",
+    port: 4173,
+    strictPort: true,
+    allowedHosts: true,
+  },
 });

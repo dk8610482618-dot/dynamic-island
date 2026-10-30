@@ -38,8 +38,31 @@ data class BehaviorOptions(
     val enableMetaballShader: Boolean = true,
     val maxConcurrentActivities: Int = 3,
     val idleMiniStatusBar: Boolean = false,
-    val hideInFullscreenApps: Boolean = false
-)
+    val hideInFullscreenApps: Boolean = false,
+    /**
+     * Gap G3 — the "Hide Notch in Apps" matrix from doc 2.
+     *
+     * Deliberately separate from [blockedPackages]: blocking a package stops its
+     * *notifications* reaching the island, while these stop the *overlay itself*
+     * drawing while that app is in the foreground. Conflating them is what made
+     * the original `hideInFullscreenApps` setting look like it did something.
+     *
+     * [hiddenPackages] hides the idle pill and routine content but still lets a
+     * critical alert (incoming call, alarm) through.
+     */
+    val hiddenPackages: Set<String> = emptySet(),
+    /** Hides the overlay completely, including critical alerts. */
+    val alwaysHiddenPackages: Set<String> = emptySet()
+) {
+    /** Builds the rule map `AppSuppressionPolicy.resolve` consumes. */
+    fun packageSuppressionRules(): Map<String, com.dynamicisland.core.privacy.AppSuppressionPolicy.PackageRule> {
+        val rules = mutableMapOf<String, com.dynamicisland.core.privacy.AppSuppressionPolicy.PackageRule>()
+        hiddenPackages.forEach { rules[it] = com.dynamicisland.core.privacy.AppSuppressionPolicy.PackageRule.HIDE_NON_CRITICAL }
+        // HIDE_ALWAYS wins where a package somehow appears in both sets.
+        alwaysHiddenPackages.forEach { rules[it] = com.dynamicisland.core.privacy.AppSuppressionPolicy.PackageRule.HIDE_ALWAYS }
+        return com.dynamicisland.core.privacy.AppSuppressionPolicy.sanitize(rules)
+    }
+}
 
 /** Shared by the host, service and boot receiver; a deliberate Stop survives process death. */
 class BehaviorPreferences internal constructor(context: Context) {
@@ -84,7 +107,9 @@ class BehaviorPreferences internal constructor(context: Context) {
             enableMetaballShader = prefs.getBoolean("enable_metaball_shader", true),
             maxConcurrentActivities = prefs.getInt("max_concurrent_activities", 3).coerceIn(2, 3),
             idleMiniStatusBar = prefs.getBoolean("idle_mini_status_bar", false),
-            hideInFullscreenApps = prefs.getBoolean("hide_in_fullscreen_apps", false)
+            hideInFullscreenApps = prefs.getBoolean("hide_in_fullscreen_apps", false),
+            hiddenPackages = prefs.getStringSet("hidden_packages", emptySet())!!.toSet(),
+            alwaysHiddenPackages = prefs.getStringSet("always_hidden_packages", emptySet())!!.toSet()
         )
     )
     val options: StateFlow<BehaviorOptions> = _options.asStateFlow()
@@ -97,6 +122,8 @@ class BehaviorPreferences internal constructor(context: Context) {
                 quietStart = it.quietStart.coerceIn(0, 1439),
                 quietEnd = it.quietEnd.coerceIn(0, 1439),
                 blockedPackages = it.blockedPackages.toSet(),
+                hiddenPackages = it.hiddenPackages.toSet(),
+                alwaysHiddenPackages = it.alwaysHiddenPackages.toSet(),
                 hapticIntensity = it.hapticIntensity.coerceIn(0, 3),
                 maxConcurrentActivities = it.maxConcurrentActivities.coerceIn(2, 3)
             )
@@ -134,6 +161,8 @@ class BehaviorPreferences internal constructor(context: Context) {
             .putInt("max_concurrent_activities", next.maxConcurrentActivities)
             .putBoolean("idle_mini_status_bar", next.idleMiniStatusBar)
             .putBoolean("hide_in_fullscreen_apps", next.hideInFullscreenApps)
+            .putStringSet("hidden_packages", next.hiddenPackages)
+            .putStringSet("always_hidden_packages", next.alwaysHiddenPackages)
             .apply()
         _options.value = next
     }

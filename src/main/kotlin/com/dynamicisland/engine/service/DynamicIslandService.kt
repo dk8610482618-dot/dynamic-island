@@ -66,6 +66,13 @@ import com.dynamicisland.engine.core.model.MediaPlaybackSnapshot
 import com.dynamicisland.engine.repository.DynamicIslandRepository
 import com.dynamicisland.engine.settings.BehaviorPreferences
 import com.dynamicisland.engine.settings.IslandSettings
+import com.dynamicisland.core.privacy.AppSuppressionPolicy
+import com.dynamicisland.core.system.ServiceWatchdogPolicy
+import com.dynamicisland.engine.core.model.MiniStatusBarSnapshot
+import com.dynamicisland.engine.core.model.PriorityRank
+import com.dynamicisland.engine.ingestion.notifications.DynamicIslandNotificationListener
+import com.dynamicisland.engine.ingestion.system.ForegroundAppObserver
+import com.dynamicisland.engine.ingestion.system.MiniStatusBarSource
 import com.dynamicisland.engine.ui.FixedIslandCapsule
 import com.dynamicisland.engine.window.OverlayWindowPolicy
 import kotlinx.coroutines.*
@@ -166,6 +173,16 @@ class DynamicIslandService : Service(), LifecycleOwner, SavedStateRegistryOwner,
     private var windowRotation by mutableFloatStateOf(0f)
     private var locked by mutableStateOf(true)
     private var receiverRegistered = false
+
+    /** Gap G4 — real battery/signal data for the immersive mini status bar. */
+    private var miniBarSource: MiniStatusBarSource? = null
+    private val _miniBar = MutableStateFlow(MiniStatusBarSnapshot())
+
+    /** Gap G3 — foreground observation for contextual app suppression. */
+    private var foregroundObserver: ForegroundAppObserver? = null
+
+    /** Gap G6 — notices a killed or wedged service and recovers it. */
+    private var watchdog: IslandServiceWatchdog? = null
     private val keyguard get() = getSystemService(KeyguardManager::class.java)
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -206,9 +223,43 @@ class DynamicIslandService : Service(), LifecycleOwner, SavedStateRegistryOwner,
             }
             scope.launch { repository.currentCall.collect { _call.value = it } }
             scope.launch { repository.batteryState.collect { _battery.value = it } }
+
+            // Gap G4: event-driven battery/connectivity/signal, never polled.
+            miniBarSource = MiniStatusBarSource(applicationContext).also { source ->
+                source.start()
+                scope.launch { source.snapshot.collect { _miniBar.value = it } }
+            }
+
+            // Gap G3: foreground state for the app-suppression matrix.
+            foregroundObserver = ForegroundAppObserver(applicationContext).also { it.refresh() }
+
+            // Gap G6: watchdog. Heartbeats ride on island-state publication, so a
+            // service that stops publishing is detected as wedged.
+            watchdog = IslandServiceWatchdog(
+                context = applicationContext,
+                scope = scope,
+                onRestartService = { scheduleWatchdogAlarm(applicationContext, 0L) },
+                onReattachOverlay = { runCatching { attachWindow() } }
+            ).also { wd ->
+                wd.healthProvider = {
+                    ServiceWatchdogPolicy.HealthSignal(
+                        isServiceRunning = !stopping && _running.value,
+                        isOverlayAttached = view?.isAttachedToWindow == true,
+                        // The listener already publishes its own connection state; no new
+                        // repository API is needed for the watchdog to read it.
+                        isListenerConnected = DynamicIslandNotificationListener.isConnected.value,
+                        millisSinceLastHeartbeat = wd.millisSinceLastHeartbeat(),
+                        hasBatteryExemption = wd.hasBatteryExemption(),
+                        isUserEnabled = BehaviorPreferences.get(this).options.value.enabled
+                    )
+                }
+                wd.start()
+            }
             scope.launch { repository.islandState.collect {
                 _state.value = it
                 if (it !is IslandState.Closed) idleExpanded = false
+                // Gap G6: publishing state is the service's liveness proof.
+                watchdog?.heartbeat()
                 updateWindow(); updateBubble()
             } }
             scope.launch { repository.priorityArbiter.actionStatus.collect { _actionStatus.value = it } }
@@ -249,6 +300,7 @@ class DynamicIslandService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                 val status by repository.priorityArbiter.actionStatus.collectAsState()
                 val microphoneActive by repository.isMicrophoneInUse.collectAsState()
                 val cameraActive by repository.isCameraInUse.collectAsState()
+                val miniBar by _miniBar.collectAsState()
                 val animateContent = !options.reducedMotion && options.motion != MotionPreset.NONE && ValueAnimator.areAnimatorsEnabled()
                 Box(Modifier.fillMaxSize()) {
                     if (!panelVisible || locked) FixedIslandCapsule(state, playback, locked, windowRotation,
@@ -258,7 +310,9 @@ class DynamicIslandService : Service(), LifecycleOwner, SavedStateRegistryOwner,
                         cornerRadius = androidx.compose.ui.unit.Dp(windowCorner),
                         microphoneActive = microphoneActive,
                         cameraActive = cameraActive,
-                        isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
+                        isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE,
+                        // Gap G4: real battery/signal instead of a constant glyph.
+                        miniStatusBar = miniBar)
                     // Removing this subtree immediately on lock avoids retaining private content
                     // during an exit animation. Re-targeting visibility cancels any entrance.
                     if (!locked) AnimatedVisibility(visible = panelVisible,
@@ -543,7 +597,37 @@ class DynamicIslandService : Service(), LifecycleOwner, SavedStateRegistryOwner,
             repository.sendUserCommand(IslandUserCommand.CollapseExpanded)
             repository.sendUserCommand(IslandUserCommand.CloseInbox)
         }
-        view?.visibility = if (!interactive || (locked && !o.showOnLockScreen) || (landscape && o.hideInLandscape)) View.GONE else View.VISIBLE
+        // Gap G3 — contextual app suppression. `hideInFullscreenApps` was a dead
+        // setting before this: persisted, never read. Suppression now hides the
+        // overlay while a listed or full-screen app is in the foreground, while a
+        // critical alert still breaks through unless the user chose HIDE_ALWAYS.
+        val suppression = AppSuppressionPolicy.resolve(
+            foreground = foregroundObserver?.state?.value,
+            packageRules = o.packageSuppressionRules(),
+            autoHideInFullscreen = o.hideInFullscreenApps,
+            pendingAlertIsCritical = isCriticalContentOnScreen(),
+            islandEnabled = o.enabled
+        )
+        val hiddenByAppPolicy = suppression.suppressesOverlay &&
+            !(AppSuppressionPolicy.mayShowCriticalAlert(suppression) && isCriticalContentOnScreen())
+        view?.visibility = if (!interactive || hiddenByAppPolicy || (locked && !o.showOnLockScreen) || (landscape && o.hideInLandscape)) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * True when what is on screen is a critical alert (incoming call, alarm) that
+     * must break through full-screen suppression unless the user explicitly chose
+     * to hide the island completely inside that app.
+     */
+    private fun isCriticalContentOnScreen(): Boolean {
+        val current = repository.islandState.value
+        val rank = when (current) {
+            is IslandState.AlertPeek -> current.alert.rank
+            is IslandState.Compact -> current.activity.rank
+            is IslandState.Minimal -> current.primary.rank
+            is IslandState.Expanded -> current.activity.rank
+            else -> return false
+        }
+        return rank == PriorityRank.EMERGENCY_OR_CALL
     }
 
     private fun openDashboard() {
@@ -605,6 +689,10 @@ class DynamicIslandService : Service(), LifecycleOwner, SavedStateRegistryOwner,
         _running.value = false
         instance = null
         if (receiverRegistered) unregisterReceiver(screenReceiver)
+        // Gap G3/G4/G6: stop observing before the scope is cancelled.
+        watchdog?.stop(); watchdog = null
+        foregroundObserver = null
+        miniBarSource?.stop(); miniBarSource = null
         if (watchingOverlayPermission) getSystemService(AppOpsManager::class.java).stopWatchingMode(appOpsListener)
         removeBubble()
         view?.let { if (it.isAttachedToWindow) runCatching { wm.removeViewImmediate(it) }; it.disposeComposition() }
