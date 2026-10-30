@@ -44,6 +44,10 @@ import com.dynamicisland.core.privacy.LockStatePrivacyPolicy
 import com.dynamicisland.engine.core.model.*
 import com.dynamicisland.engine.settings.BehaviorOptions
 import com.dynamicisland.engine.ui.components.AudioWaveformEqualizer
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.compose.ui.platform.LocalContext
+import com.dynamicisland.core.media.WaveformSourcePolicy
 import com.dynamicisland.core.system.MiniStatusBarPolicy
 import com.dynamicisland.engine.ui.icons.IslandGlyph
 import com.dynamicisland.engine.ui.util.rememberMiniBarClock
@@ -82,6 +86,14 @@ fun FixedIslandCapsule(
      */
     miniStatusBar: MiniStatusBarSnapshot? = null
 ) {
+    val context = LocalContext.current
+    // RECORD_AUDIO gates any real FFT path; without it the policy can only ever
+    // resolve to synthetic or flat. Checked once per composition, not per frame.
+    val hasRecordAudioPermission = remember(context) {
+        context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val activity = when (state) {
             is IslandState.Compact -> state.activity
@@ -348,8 +360,56 @@ fun FixedIslandCapsule(
             if (!secondary && widthLimitedSpec.showTrailing) {
                 when {
                     media && !locked && playback.isPlaying -> {
-                        val waveAmps = (activity?.compactTrailing as? IslandSlotContent.AudioWaveform)?.amplitudes
-                            ?.takeIf { it.isNotEmpty() } ?: listOf(0.45f, 0.85f, 0.6f, 0.9f)
+                        // Gap G7 — this fallback used to be a hard-coded
+                        // `listOf(0.45f, 0.85f, 0.6f, 0.9f)`. AudioWaveformEqualizer
+                        // treats any non-empty list as `realData` and renders it
+                        // verbatim, so four invented constants were being drawn as
+                        // though they were measured audio — the exact thing that
+                        // component's own KDoc forbids ("Only a genuine audio source
+                        // should ever provide these").
+                        //
+                        // WaveformSourcePolicy resolves the capability instead. We
+                        // attach no android.media.audiofx.Visualizer session here, so
+                        // this is never REAL_FFT and `mayBeDescribedAsRealSpectrum`
+                        // stays false: the bars are synthetic motion driven by the
+                        // playback position, not a spectrum claim.
+                        val suppliedAmps =
+                            (activity?.compactTrailing as? IslandSlotContent.AudioWaveform)
+                                ?.amplitudes.orEmpty()
+                        val waveformCapability = remember(
+                            options.reducedMotion,
+                            hasRecordAudioPermission
+                        ) {
+                            WaveformSourcePolicy.resolve(
+                                isVisible = true,
+                                isPlaying = playback.isPlaying,
+                                waveformEnabledInSettings = !options.reducedMotion,
+                                hasRecordAudioPermission = hasRecordAudioPermission,
+                                deviceSupportsVisualizer = false,
+                                visualizerSessionAttached = false,
+                                apiLevel = android.os.Build.VERSION.SDK_INT,
+                                reduceMotion = options.reducedMotion
+                            )
+                        }
+                        val waveAmps = when {
+                            // Genuine upstream amplitudes win, whatever the local
+                            // capability says — they came from a real source.
+                            suppliedAmps.isNotEmpty() -> suppliedAmps
+                            waveformCapability.source == WaveformSourcePolicy.WaveformSource.SYNTHETIC ->
+                                WaveformSourcePolicy.syntheticAmplitudes(
+                                    barCount = WaveformSourcePolicy.DEFAULT_BAR_COUNT,
+                                    phase = WaveformSourcePolicy.syntheticPhase(
+                                        positionMs = playback.positionMs,
+                                        speed = playback.playbackSpeed
+                                    ),
+                                    energy = 1f,
+                                    isPlaying = true
+                                )
+                            // FLAT / UNAVAILABLE: hand the empty list back so the
+                            // equalizer uses its documented honest "playing"
+                            // iconography rather than invented telemetry.
+                            else -> emptyList()
+                        }
                         Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
                             AudioWaveformEqualizer(
                                 amplitudes = waveAmps,

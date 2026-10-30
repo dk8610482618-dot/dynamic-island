@@ -81,6 +81,13 @@ fun CallExpandedContent(
     onHangup: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
+    /**
+     * Gap G8 — feature keys the calling app advertised in its session extras,
+     * collected via [advertisedFeatureKeys]. Empty (the default) means nothing was
+     * advertised, so no source-advertised rows are rendered: the card reports only
+     * what it actually knows rather than inventing SharePlay-style state.
+     */
+    advertisedExtraKeys: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -133,6 +140,20 @@ fun CallExpandedContent(
         }
 
         Spacer(modifier = Modifier.height(14.dp))
+
+        // ---------- Session features (Gap G8) ----------
+        // Screen share / live captions / translation / a shared session are shown
+        // only when their state came from somewhere real: the device, or the
+        // calling app advertising it in its session extras. CallSessionFeatures
+        // owns that rule; nothing here guesses from the app name or call length.
+        CallFeatureRows(
+            isCallActive = !isIncoming,
+            isMuted = isMuted,
+            isSpeakerOn = isSpeaker,
+            isOnHold = isOnHold,
+            isControllable = isControllable,
+            advertisedExtraKeys = advertisedExtraKeys
+        )
 
         // ---------- Actions ----------
         if (isIncoming) {

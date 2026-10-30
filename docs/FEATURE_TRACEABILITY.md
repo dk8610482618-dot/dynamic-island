@@ -85,12 +85,12 @@ boundary (`millisUntilNextClockTick`) rather than polling — which is what doc 
 | Call presenter: incoming accept/decline, active duration, mute, speaker | base | `CallExpandedContent.kt`, `TelecomCallTracker.kt` |
 | Generic notification peek + inbox | base | `AlertPeekContent.kt`, `NotificationInboxContent.kt` |
 | Album-art dominant colour → waveform tint + keyline tint | base | `AlbumArtResolver.kt`, `enableKeylineTint` |
-| **FFT-driven multi-bar equaliser, flattening on pause** | **added** (G7) | `core/media/WaveformSourcePolicy.kt` (real FFT magnitude + log binning + attack/release smoothing) |
-| Waveform labelled honestly when real FFT is unavailable | **added** (G7) | `WaveformCapability.mayBeDescribedAsRealSpectrum` |
+| **FFT-driven multi-bar equaliser, flattening on pause** | **added** (G7) | `core/media/WaveformSourcePolicy.kt` (FFT magnitude + log binning + attack/release smoothing), consumed in `FixedIslandCapsule.kt` |
+| Waveform labelled honestly when no real spectrum exists | **added** (G7) | `WaveformSourcePolicy.resolve` → `mayBeDescribedAsRealSpectrum`; synthetic bars are driven by playback **position**, so pausing freezes them |
 | Media scrub bar with seeking, elapsed/remaining | base | `MediaExpandedContent.kt`, `IslandScrubber` |
 | Lyric captions where available | base | `ExpandedRegionData.lyricLine` |
-| **Output routing selector (AirPlay/Bluetooth equivalent)** | **added** (G9) | `core/media/AudioRoutePolicy.kt` |
-| **SharePlay / Live Captions / Live Translation status** | **added** (G8) | `core/call/CallSessionFeatures.kt` |
+| **Output routing selector (AirPlay/Bluetooth equivalent)** | **added** (G9) | `core/media/AudioRoutePolicy.kt`, rendered by `ui/components/AudioRouteRow.kt` inside `MediaExpandedContent.kt` |
+| **SharePlay / Live Captions / Live Translation status** | **added** (G8) | `core/call/CallSessionFeatures.kt`, rendered by `ui/components/CallFeatureRows.kt` inside `CallExpandedContent.kt` |
 | Charging / ringer-DND / Bluetooth accessory / hotspot system events | base | `SystemStateObserver.kt`, `ActivityKind.BATTERY_CHARGING` etc. |
 
 ## 5. Motion and material
@@ -125,6 +125,16 @@ boundary (`millisUntilNextClockTick`) rather than polling — which is what doc 
 | Battery-optimisation exemption onboarding | base | `MainActivity.kt` |
 | **Foreground-service watchdog (killed/wedged detection)** | **added** (G6) | `core/system/ServiceWatchdogPolicy.kt`, `service/IslandServiceWatchdog.kt` |
 | **Restart backoff that stops after refused exemptions** | **added** (G6) | `backoffFor`, `MAX_EXEMPTION_PROMPTS` |
+
+**Fake waveform fixed (G7):** the compact capsule fell back to a hard-coded
+`listOf(0.45f, 0.85f, 0.6f, 0.9f)`. `AudioWaveformEqualizer` treats *any*
+non-empty list as measured data and renders it verbatim — so four invented
+constants were drawn as though they were real audio, contradicting that
+component's own KDoc. The fallback is now resolved by `WaveformSourcePolicy`:
+genuine upstream amplitudes win, otherwise position-driven synthetic bars, and
+otherwise an empty list so the equalizer uses its documented honest "playing"
+iconography. No `Visualizer` session is attached, so the policy never resolves
+`REAL_FFT` and `mayBeDescribedAsRealSpectrum` stays `false`.
 
 **Dead setting fixed (G3):** `hideInFullscreenApps` was declared in
 `BehaviorOptions`, persisted to SharedPreferences, and **read by nothing** — it

@@ -1,4 +1,4 @@
-﻿package com.dynamicisland.engine.ui.components
+package com.dynamicisland.engine.ui.components
 
 import android.os.SystemClock
 import androidx.compose.animation.core.animateFloatAsState
@@ -253,6 +253,14 @@ fun MediaExpandedContent(
         } else {
             Spacer(modifier = Modifier.height(1.dp))
         }
+
+        // ---------- Output route (Gap G9) ----------
+        // Informational: Android gives a third-party app no way to reroute another
+        // app's media output, so AudioRoutePolicy resolves MEDIA as never
+        // route-changeable and taps hand off to the system sound settings rather
+        // than presenting a toggle that would silently do nothing. This card has
+        // no source-app deep link, so the sheet fallback is not offered here.
+        AudioRouteRow(sourceAppHasRoutingSheet = false)
 
         // ---------- Transport ----------
         Row(
